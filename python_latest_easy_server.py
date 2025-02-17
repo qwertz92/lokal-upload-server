@@ -175,81 +175,83 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         '''
         self.wfile.write(html.encode())
 
-    def do_POST(self):
-        """Verarbeitet den Datei-Upload mit verbesserter Fehlerbehandlung."""
+def do_POST(self):
+    """Verarbeitet den Datei-Upload mit Streaming für große Dateien."""
+    try:
+        # Lese die Content-Length und den Content-Type
+        content_length = int(self.headers.get('Content-Length', 0))
+        content_type = self.headers.get('Content-Type', '')
+        
+        if not content_type.startswith('multipart/form-data'):
+            raise ValueError("Falscher Content-Type")
+            
+        # Hole die boundary aus dem Content-Type
+        boundary = '--' + content_type.split('=')[1]
+        
+        # Puffer-Größe: 8MB
+        BUFFER_SIZE = 8 * 1024 * 1024
+        
+        # Temporäre Datei für den Upload
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        
+        # Status-Variablen
+        reading_file = False
+        filename = None
+        bytes_read = 0
+        
         try:
-            # Lese die Content-Length und den Content-Type
-            content_length = int(self.headers.get('Content-Length', 0))
-            content_type = self.headers.get('Content-Type', '')
+            # Lese die Daten in Chunks
+            while bytes_read < content_length:
+                chunk = self.rfile.read(min(BUFFER_SIZE, content_length - bytes_read))
+                if not chunk:
+                    break
+                    
+                if not reading_file:
+                    # Suche nach Dateinamen im Header
+                    chunk_str = chunk.decode('utf-8', 'ignore')
+                    if 'filename="' in chunk_str:
+                        filename = chunk_str.split('filename="')[1].split('"')[0]
+                        # Finde den Start der Dateidaten
+                        file_start = chunk.find(b'\r\n\r\n') + 4
+                        if file_start > 0:
+                            reading_file = True
+                            chunk = chunk[file_start:]
+                
+                if reading_file:
+                    temp_file.write(chunk)
+                    
+                bytes_read += len(chunk)
             
-            # Hole die boundary aus dem Content-Type
-            boundary = content_type.split('=')[1].encode()
+            temp_file.close()
             
-            # Lese die POST-Daten
-            post_data = self.rfile.read(content_length)
-            
-            # Teile die Daten in Teile auf der Basis der boundary
-            parts = post_data.split(b'--' + boundary)
-            
-            # Iteriere durch die Teile, um die Datei zu finden
-            for part in parts:
-                if b'filename=' in part:
-                    # Extrahiere den Header-Teil
-                    header_end = part.find(b'\r\n\r\n')
-                    if header_end == -1:
-                        continue
-                        
-                    header = part[:header_end].decode('utf-8', 'ignore')
-                    body = part[header_end + 4:]
-                    
-                    # Finde den Dateinamen
-                    filename_match = re.search(r'filename="(.+?)"', header)
-                    if not filename_match:
-                        continue
-                    
-                    # Extrahiere und bereinige den Dateinamen
-                    filename = filename_match.group(1)
-                    filename = filename.replace('\\', '/').strip()  # Normalisiere Pfadtrenner
-                    filename = re.sub(r'[\r\n"]', '', filename)    # Entferne ungültige Zeichen
-                    
-                    # Finde den Pfad (für Ordner-Upload)
-                    path_match = re.search(r'name="path"\r\n\r\n(.+?)(?:\r\n|$)', header)
-                    if path_match:
-                        filepath = path_match.group(1).strip()
-                        save_path = os.path.join('uploads', filepath)
-                    else:
-                        save_path = os.path.join('uploads', filename)
-                    
-                    # Normalisiere den Pfad und erstelle Verzeichnisse
-                    save_path = os.path.normpath(save_path)
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    
-                    # Finde das Ende der Dateidaten
-                    if body.endswith(b'\r\n'):
-                        body = body[:-2]
-                    
-                    # Speichere die Datei
-                    with open(save_path, 'wb') as f:
-                        f.write(body)
-                    
-                    print(f"Datei erfolgreich gespeichert: {save_path}")  # Logging
-                    
-                    # Sende Erfolgsmeldung
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/plain')
-                    self.end_headers()
-                    self.wfile.write(f"Datei {os.path.basename(save_path)} erfolgreich hochgeladen".encode())
-                    return
-            
-            # Wenn keine Datei gefunden wurde
-            raise ValueError("Keine Datei im Upload gefunden")
-            
+            if filename:
+                # Erstelle den endgültigen Pfad
+                save_path = os.path.join('uploads', filename)
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                
+                # Verschiebe die temporäre Datei an den endgültigen Ort
+                import shutil
+                shutil.move(temp_file.name, save_path)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"Datei {filename} erfolgreich hochgeladen".encode())
+            else:
+                raise ValueError("Keine Datei gefunden")
+                
         except Exception as e:
-            print(f"Fehler beim Upload: {str(e)}")  # Server-seitige Logging
-            self.send_response(500)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            # Lösche die temporäre Datei im Fehlerfall
+            os.unlink(temp_file.name)
+            raise e
+            
+    except Exception as e:
+        print(f"Fehler beim Upload: {str(e)}")
+        self.send_response(500)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(str(e).encode())
 
 # def run_server(port=8040):
 #     """Startet den Server auf dem angegebenen Port."""
