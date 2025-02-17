@@ -1,0 +1,20 @@
+# Text-Dateien standardmäßig mit LF (Unix-Style) speichern
+* text=auto
+
+# Python-Dateien explizit als Text mit LF markieren
+*.py text eol=lf
+
+# Spezifische Textdateien mit LF
+*.xml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binärdateien, die nicht verändert werden sollen
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.pdf binary
