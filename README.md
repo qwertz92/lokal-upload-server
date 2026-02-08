@@ -15,6 +15,11 @@ A local Python upload server for LAN usage, with queue support, folder structure
 - File and folder uploads (folder root and structure preserved)
 - Preflight checks before upload (existing file conflicts + disk space availability)
 - Per-file conflict selection (overwrite/skip)
+- Advanced conflict modal with:
+  - Search scope (`files`, `folders`, `both`)
+  - Selection filter toggle (`all`, `selected`, `unselected`)
+  - Folder-level rules (`keep`, `overwrite`, automatic `mixed` state)
+  - Collapsible file/folder views and larger/compact modal size
 - Byte-based progress, speed, and ETA
 - Overall progress for the running queue
 - Abort support for active uploads
@@ -104,7 +109,26 @@ python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1
 - Files panel: choose one or more files and click `Add to queue`
 - Folder panel: choose a folder and click `Add to queue`
 - On conflicts: choose per file whether to overwrite or keep
+- Conflict modal:
+  - `Overwrite all` applies to current search matches (scope + filter)
+  - `Selection` toggle filters visible rows (`all`, `selected`, `unselected`)
+  - Folder rules can apply overwrite/keep to full folders at once
 - Queue jobs run automatically one after another
+
+## Conflict Modal Quick Guide
+
+- Search scope:
+  - `files`: search by file path
+  - `folders`: search by folder path
+  - `both`: match either file or folder
+- Selection toggle:
+  - `all`: show all matching rows
+  - `selected`: show only rows currently marked for overwrite
+  - `unselected`: show only rows currently set to keep
+- Folder rule colors:
+  - green row = full folder overwrite
+  - orange row = mixed state in that folder
+  - neutral row = keep
 
 ## Terms
 
