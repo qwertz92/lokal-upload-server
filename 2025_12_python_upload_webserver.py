@@ -230,10 +230,16 @@ class _ServerState:
             session = self._sessions.get(upload_id)
             if not session:
                 return
-            if int(session.get("files_done", 0)) >= int(session.get("total_files", 0)) > 0:
+            if (
+                int(session.get("files_done", 0))
+                >= int(session.get("total_files", 0))
+                > 0
+            ):
                 self._sessions.pop(upload_id, None)
 
-    def is_path_reserved(self, rel_path: str, *, exclude_upload_id: str | None = None) -> bool:
+    def is_path_reserved(
+        self, rel_path: str, *, exclude_upload_id: str | None = None
+    ) -> bool:
         key = _path_key(rel_path)
         with self._lock:
             owner = self._reserved_paths.get(key)
@@ -270,9 +276,15 @@ _HTML_CONFIG = {
 
 def _render_html() -> str:
     html = _HTML_TEMPLATE
-    html = html.replace("__MAX_FILE_RETRIES__", str(int(_HTML_CONFIG["max_file_retries"])))
-    html = html.replace("__RETRY_BASE_DELAY_MS__", str(int(_HTML_CONFIG["retry_delay_ms"])))
-    html = html.replace("__UPLOAD_TIMEOUT_MS__", str(int(_HTML_CONFIG["upload_timeout_ms"])))
+    html = html.replace(
+        "__MAX_FILE_RETRIES__", str(int(_HTML_CONFIG["max_file_retries"]))
+    )
+    html = html.replace(
+        "__RETRY_BASE_DELAY_MS__", str(int(_HTML_CONFIG["retry_delay_ms"]))
+    )
+    html = html.replace(
+        "__UPLOAD_TIMEOUT_MS__", str(int(_HTML_CONFIG["upload_timeout_ms"]))
+    )
     return html
 
 
@@ -290,7 +302,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         print(text, flush=True)
 
     def _client_ip(self) -> str:
-        return (self.client_address[0] if self.client_address else "unknown") or "unknown"
+        return (
+            self.client_address[0] if self.client_address else "unknown"
+        ) or "unknown"
 
     def _note_client_if_new(self) -> None:
         ip = self._client_ip()
@@ -332,7 +346,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/":
             self._send_json(404, {"ok": False, "error": "not_found"})
             return
-        self._send_bytes(200, _render_html().encode("utf-8"), "text/html; charset=utf-8")
+        self._send_bytes(
+            200, _render_html().encode("utf-8"), "text/html; charset=utf-8"
+        )
 
     def do_POST(self) -> None:
         self._note_client_if_new()
@@ -429,7 +445,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         ip = self._client_ip()
         sem = STATE.get_ip_semaphore(ip)
         if not sem.acquire(blocking=False):
-            self._send_json(429, {"ok": False, "error": "Upload already active (use queue)"})
+            self._send_json(
+                429, {"ok": False, "error": "Upload already active (use queue)"}
+            )
             return
 
         temp_path: Path | None = None
@@ -646,6 +664,20 @@ _HTML_TEMPLATE = r"""<!doctype html>
     .btn.secondary:hover { background: rgba(255,255,255,.09); }
     .btn.danger { background: rgba(239, 68, 68, .12); }
     .btn.danger:hover { background: rgba(239, 68, 68, .18); }
+    .btn.secondary.mode-selected {
+      background: rgba(34, 197, 94, .18);
+      border-color: rgba(34, 197, 94, .45);
+    }
+    .btn.secondary.mode-selected:hover {
+      background: rgba(34, 197, 94, .24);
+    }
+    .btn.secondary.mode-unselected {
+      background: rgba(239, 68, 68, .16);
+      border-color: rgba(239, 68, 68, .45);
+    }
+    .btn.secondary.mode-unselected:hover {
+      background: rgba(239, 68, 68, .24);
+    }
     .meta { margin-top: 8px; color: var(--muted); font-size: 13px; min-height: 18px; }
     .meta.warn { color: var(--yellow); }
     .meta.error { color: var(--red); }
@@ -720,16 +752,44 @@ _HTML_TEMPLATE = r"""<!doctype html>
     .modal.show { display: flex; }
     .modalCard {
       width: min(840px, 100%);
-      max-height: min(80vh, 760px);
+      height: min(80vh, 760px);
       overflow: hidden;
       border-radius: 14px;
       border: 1px solid var(--border);
       background: rgba(16,25,43,.98);
       box-shadow: 0 18px 60px rgba(0,0,0,.45);
       padding: 14px;
-      display: grid;
-      grid-template-rows: auto auto 1fr auto;
+      display: flex;
+      flex-direction: column;
       gap: 10px;
+    }
+    .modalCard.expanded {
+      width: min(1120px, 98vw);
+      height: min(92vh, 900px);
+    }
+    #conflictText { min-height: 18px; }
+    .confControls {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn.small {
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .confControls .btn.small {
+      min-width: 170px;
+      flex: 1 1 170px;
+      text-align: center;
+      justify-content: center;
+    }
+    .confControls .btn.small.mode-hidden {
+      background: rgba(239, 68, 68, .16);
+      border-color: rgba(239, 68, 68, .45);
+    }
+    .confControls .btn.small.mode-hidden:hover {
+      background: rgba(239, 68, 68, .24);
     }
     .confList {
       border: 1px solid var(--border);
@@ -737,12 +797,34 @@ _HTML_TEMPLATE = r"""<!doctype html>
       background: rgba(255,255,255,.03);
       overflow: auto;
       padding: 10px;
+      min-height: 0;
       font-size: 13px;
       color: var(--muted);
     }
     .confList div { margin: 4px 0; }
     .confTools {
       display: grid;
+      grid-template-rows: auto auto auto;
+      gap: 6px;
+      min-height: 0;
+    }
+    .confScopeRow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .confScopeSelect {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(16,25,43,.98);
+      color: var(--text);
+      padding: 6px 8px;
+    }
+    .confSplit {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
       gap: 8px;
     }
     .confFilter {
@@ -755,7 +837,79 @@ _HTML_TEMPLATE = r"""<!doctype html>
       outline: none;
     }
     .confFilter::placeholder { color: var(--muted); }
-    .confFilterMeta { color: var(--muted); font-size: 12px; }
+    .confFilterMeta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      min-height: 16px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      margin: 0;
+    }
+    .confFolderSection {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex: 1;
+      min-height: 0;
+    }
+    .confFolderSection.collapsed { display: none; }
+    .confFolderList {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255,255,255,.03);
+      min-height: 0;
+      max-height: none;
+      overflow: auto;
+      padding: 4px;
+      display: grid;
+      gap: 3px;
+      align-content: start;
+      font-size: 13px;
+      flex: 1;
+    }
+    .confFolderRow {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: center;
+      padding: 2px 4px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.02);
+      border: 1px solid transparent;
+    }
+    .confFolderRow.state-overwrite {
+      background: rgba(34, 197, 94, .12);
+      border-color: rgba(34, 197, 94, .40);
+    }
+    .confFolderRow.state-mixed {
+      background: rgba(245, 158, 11, .14);
+      border-color: rgba(245, 158, 11, .44);
+    }
+    .confFolderName {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.2;
+    }
+    .confFolderSelect {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(16,25,43,.98) !important;
+      color: var(--text);
+      padding: 3px 6px;
+      line-height: 1.2;
+    }
+    .confFileSection {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+    }
+    .confFileSection.collapsed { display: none; }
+    .confFileSection .confList {
+      width: 100%;
+      height: 100%;
+    }
     .confRow {
       display: grid;
       grid-template-columns: 18px 1fr auto;
@@ -835,11 +989,33 @@ _HTML_TEMPLATE = r"""<!doctype html>
           Overwrite all
         </label>
       </div>
+      <div class="confControls">
+        <button class="btn secondary small" id="toggleFolderBtn" type="button">Hide folder view</button>
+        <button class="btn secondary small" id="toggleFileBtn" type="button">Hide file view</button>
+        <button class="btn secondary small" id="selectionFilterBtn" type="button">Selection: all</button>
+        <button class="btn secondary small" id="toggleSizeBtn" type="button">Larger size</button>
+      </div>
       <div class="confTools">
+        <div class="confScopeRow">
+          <label class="qsub mono" for="conflictScope">Search scope</label>
+          <select class="confScopeSelect mono" id="conflictScope">
+            <option value="files" selected>files</option>
+            <option value="folders">folders</option>
+            <option value="both">both</option>
+          </select>
+        </div>
         <input class="confFilter mono" id="conflictFilter" type="text" placeholder="Filter by path..." />
         <div class="confFilterMeta mono" id="conflictFilterMeta"></div>
       </div>
-      <div class="confList mono" id="conflictList"></div>
+      <div class="confSplit">
+        <div class="confFolderSection" id="conflictFolderSection">
+          <div class="confFilterMeta mono" id="conflictFolderMeta"></div>
+          <div class="confFolderList mono" id="conflictFolderList"></div>
+        </div>
+        <div class="confFileSection" id="conflictFileSection">
+          <div class="confList mono" id="conflictList"></div>
+        </div>
+      </div>
       <div class="confSummary" id="conflictSummary"></div>
       <div class="row">
         <button class="btn" id="conflictOkBtn" type="button">Continue</button>
@@ -1094,36 +1270,144 @@ _HTML_TEMPLATE = r"""<!doctype html>
     function showConflictDialog(conflicts, summaryInfo = null) {
       return new Promise((resolve) => {
         const modal = $('conflictModal');
+        const modalCard = modal.querySelector('.modalCard');
         const list = $('conflictList');
         const text = $('conflictText');
         const allToggle = $('conflictAll');
         const summary = $('conflictSummary');
+        const scopeSelect = $('conflictScope');
         const filterInput = $('conflictFilter');
         const filterMeta = $('conflictFilterMeta');
+        const folderSection = $('conflictFolderSection');
+        const folderMeta = $('conflictFolderMeta');
+        const folderList = $('conflictFolderList');
+        const fileSection = $('conflictFileSection');
+        const toggleFolderBtn = $('toggleFolderBtn');
+        const toggleFileBtn = $('toggleFileBtn');
+        const selectionFilterBtn = $('selectionFilterBtn');
+        const toggleSizeBtn = $('toggleSizeBtn');
         list.textContent = '';
+        folderList.textContent = '';
         allToggle.checked = false;
+        scopeSelect.value = 'files';
         filterInput.value = '';
+        let selectionMode = 'all';
+        folderSection.classList.remove('collapsed');
+        fileSection.classList.remove('collapsed');
+        if (modalCard) {
+          modalCard.classList.remove('expanded');
+        }
+
+        const refreshSectionButtons = () => {
+          const folderCollapsed = folderSection.classList.contains('collapsed');
+          const fileCollapsed = fileSection.classList.contains('collapsed');
+          const expanded = !!(modalCard && modalCard.classList.contains('expanded'));
+          toggleFolderBtn.textContent = folderCollapsed ? 'Show folder view' : 'Hide folder view';
+          toggleFileBtn.textContent = fileCollapsed ? 'Show file view' : 'Hide file view';
+          toggleSizeBtn.textContent = expanded ? 'Compact size' : 'Larger size';
+          toggleFolderBtn.classList.toggle('mode-hidden', folderCollapsed);
+          toggleFileBtn.classList.toggle('mode-hidden', fileCollapsed);
+        };
+        const updateSelectionButton = () => {
+          const label =
+            selectionMode === 'selected'
+              ? 'Selection: selected'
+              : selectionMode === 'unselected'
+                ? 'Selection: unselected'
+                : 'Selection: all';
+          selectionFilterBtn.textContent = label;
+          selectionFilterBtn.classList.remove('mode-selected', 'mode-unselected');
+          if (selectionMode === 'selected') {
+            selectionFilterBtn.classList.add('mode-selected');
+          } else if (selectionMode === 'unselected') {
+            selectionFilterBtn.classList.add('mode-unselected');
+          }
+        };
+        toggleFolderBtn.onclick = () => {
+          const folderCollapsed = folderSection.classList.contains('collapsed');
+          const fileCollapsed = fileSection.classList.contains('collapsed');
+          if (folderCollapsed) {
+            folderSection.classList.remove('collapsed');
+          } else {
+            folderSection.classList.add('collapsed');
+            if (fileCollapsed) fileSection.classList.remove('collapsed');
+          }
+          refreshSectionButtons();
+        };
+        toggleFileBtn.onclick = () => {
+          const fileCollapsed = fileSection.classList.contains('collapsed');
+          const folderCollapsed = folderSection.classList.contains('collapsed');
+          if (fileCollapsed) {
+            fileSection.classList.remove('collapsed');
+          } else {
+            fileSection.classList.add('collapsed');
+            if (folderCollapsed) folderSection.classList.remove('collapsed');
+          }
+          refreshSectionButtons();
+        };
+        selectionFilterBtn.onclick = () => {
+          if (selectionMode === 'all') selectionMode = 'selected';
+          else if (selectionMode === 'selected') selectionMode = 'unselected';
+          else selectionMode = 'all';
+          updateSelectionButton();
+          applyFilter();
+        };
+        toggleSizeBtn.onclick = () => {
+          if (modalCard) modalCard.classList.toggle('expanded');
+          refreshSectionButtons();
+        };
+        updateSelectionButton();
+        refreshSectionButtons();
+
+        const getFolderKey = (rawPath) => {
+          const p = (rawPath || '')
+            .replace(/\\/g, '/')
+            .replace(/^\/+/, '')
+            .replace(/\/+/g, '/')
+            .trim();
+          if (!p) return '';
+          const idx = p.lastIndexOf('/');
+          return idx >= 0 ? p.slice(0, idx) : '';
+        };
+
+        const refreshEntryVisual = (entry) => {
+          const isOn = !!entry.cb.checked;
+          entry.row.className = `confRow ${isOn ? 'overwrite' : 'skip'}`;
+          entry.tag.textContent = entry.locked
+            ? 'in progress'
+            : (isOn ? 'overwrite' : 'keep');
+        };
 
         const entries = [];
+        const folderControls = new Map();
+        const folderRows = new Map();
         const fragment = document.createDocumentFragment();
         for (const c of conflicts) {
+          const rawPath = c.rel_path || c.path || '';
+          const reason = c.reason || 'exists';
+          const locked = reason === 'in_progress' || reason === 'duplicate_in_request';
           const row = document.createElement('label');
-          row.className = 'confRow skip';
           const cb = document.createElement('input');
           cb.type = 'checkbox';
           cb.checked = false;
           const name = document.createElement('div');
-          name.textContent = c.rel_path || c.path || '';
+          name.textContent = rawPath;
           const tag = document.createElement('div');
-          const reason = c.reason || 'exists';
-          const locked = reason === 'in_progress' || reason === 'duplicate_in_request';
-          tag.textContent = locked ? 'in progress' : 'keep';
+          const entry = {
+            cb,
+            row,
+            tag,
+            path: c.path,
+            rel_path: c.rel_path,
+            nameNorm: rawPath.toLowerCase(),
+            folderKey: getFolderKey(rawPath),
+            locked,
+          };
 
           const updateRow = () => {
-            const isOn = cb.checked;
-            row.className = `confRow ${isOn ? 'overwrite' : 'skip'}`;
-            tag.textContent = locked ? 'in progress' : (isOn ? 'overwrite' : 'keep');
-            updateSummary();
+            refreshEntryVisual(entry);
+            syncFolderControls();
+            applyFilter();
           };
 
           if (locked) {
@@ -1135,15 +1419,116 @@ _HTML_TEMPLATE = r"""<!doctype html>
           row.appendChild(name);
           row.appendChild(tag);
           fragment.appendChild(row);
-          entries.push({
-            cb,
-            row,
-            path: c.path,
-            rel_path: c.rel_path,
-            nameNorm: (c.rel_path || c.path || '').toLowerCase(),
-          });
+          refreshEntryVisual(entry);
+          entries.push(entry);
         }
         list.appendChild(fragment);
+
+        const folderStats = new Map();
+        for (const ent of entries) {
+          const key = ent.folderKey;
+          const rec = folderStats.get(key) || { count: 0, locked: 0 };
+          rec.count += 1;
+          if (ent.locked) rec.locked += 1;
+          folderStats.set(key, rec);
+        }
+        const folderKeys = Array.from(folderStats.keys()).sort((a, b) => {
+          if (!a) return -1;
+          if (!b) return 1;
+          return a.localeCompare(b);
+        });
+        const editableFolders = folderKeys.filter((k) => {
+          const rec = folderStats.get(k);
+          return !!rec && rec.locked < rec.count;
+        }).length;
+        folderMeta.textContent = folderKeys.length
+          ? `Folder rules: ${editableFolders}/${folderKeys.length} editable folder(s).`
+          : 'Folder rules: no folders found.';
+
+        const syncFolderControls = () => {
+          const refreshFolderControlVisual = (select) => {
+            if (!select) return;
+            const row = select.closest('.confFolderRow');
+            if (row) row.classList.remove('state-overwrite', 'state-mixed');
+            if (select.value === 'overwrite') {
+              if (row) row.classList.add('state-overwrite');
+            } else if (select.value === 'mixed') {
+              if (row) row.classList.add('state-mixed');
+            }
+          };
+
+          folderControls.forEach((select, folderKey) => {
+            const unlocked = entries.filter(ent => ent.folderKey === folderKey && !ent.locked);
+            if (unlocked.length === 0) return;
+            const checkedCount = unlocked.reduce((n, ent) => n + (ent.cb.checked ? 1 : 0), 0);
+            if (checkedCount === 0) {
+              select.value = 'keep';
+            } else if (checkedCount === unlocked.length) {
+              select.value = 'overwrite';
+            } else {
+              select.value = 'mixed';
+            }
+            refreshFolderControlVisual(select);
+          });
+        };
+
+        const applyFolderRule = (folderKey, mode) => {
+          const toOverwrite = mode === 'overwrite';
+          for (const ent of entries) {
+            if (ent.folderKey !== folderKey) continue;
+            if (ent.locked) continue;
+            ent.cb.checked = toOverwrite;
+            refreshEntryVisual(ent);
+          }
+          syncFolderControls();
+          applyFilter();
+        };
+
+        const folderFrag = document.createDocumentFragment();
+        for (const folderKey of folderKeys) {
+          const rec = folderStats.get(folderKey) || { count: 0, locked: 0 };
+          const row = document.createElement('div');
+          row.className = 'confFolderRow';
+          const name = document.createElement('div');
+          name.className = 'confFolderName';
+          const folderLabel = folderKey || '(root)';
+          const suffix = rec.locked > 0 ? ` (${rec.count} files, ${rec.locked} locked)` : ` (${rec.count} files)`;
+          name.textContent = `${folderLabel}${suffix}`;
+
+          const select = document.createElement('select');
+          select.className = 'confFolderSelect mono';
+          const optKeep = document.createElement('option');
+          optKeep.value = 'keep';
+          optKeep.textContent = 'keep';
+          const optOverwrite = document.createElement('option');
+          optOverwrite.value = 'overwrite';
+          optOverwrite.textContent = 'overwrite';
+          const optMixed = document.createElement('option');
+          optMixed.value = 'mixed';
+          optMixed.textContent = 'mixed';
+          optMixed.disabled = true;
+          select.appendChild(optKeep);
+          select.appendChild(optOverwrite);
+          select.appendChild(optMixed);
+          select.value = 'keep';
+          if (rec.locked >= rec.count) {
+            select.disabled = true;
+          }
+          select.onchange = () => {
+            if (select.value === 'mixed') return;
+            applyFolderRule(folderKey, select.value);
+          };
+          folderControls.set(folderKey, select);
+          folderRows.set(folderKey, {
+            row,
+            folderNorm: folderLabel.toLowerCase(),
+          });
+
+          row.appendChild(name);
+          row.appendChild(select);
+          folderFrag.appendChild(row);
+        }
+        folderList.appendChild(folderFrag);
 
         const existsCount = conflicts.filter(c => (c.reason || 'exists') === 'exists').length;
         const inProgressCount = conflicts.filter(c => c.reason === 'in_progress').length;
@@ -1161,7 +1546,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         if (queuedDupCount > 0) infoParts.push(`already in queue: ${queuedDupCount}`);
         if (dupReqCount > 0) infoParts.push(`duplicate in selection: ${dupReqCount}`);
         const summaryText = infoParts.length ? ` (${infoParts.join(' • ')})` : '';
-        text.textContent = `${conflicts.length} conflict(s) found${summaryText}. Choose what to do.`;
+        text.textContent = `${conflicts.length} conflict(s) found${summaryText}. Choose what to do (file-level and folder-level rules available).`;
         modal.classList.add('show');
 
         const updateSummary = () => {
@@ -1182,30 +1567,100 @@ _HTML_TEMPLATE = r"""<!doctype html>
             `Overwrite: ${overwrite} • Keep: ${keep} • Visible overwrite: ${visibleOverwrite} • Visible keep: ${visibleKeep}`;
         };
 
+        const syncAllToggleState = () => {
+          const targets = entries.filter((ent) => !ent.cb.disabled && !!ent._searchMatch);
+          const selectedAny = entries.some((ent) => !ent.cb.disabled && !!ent.cb.checked);
+          if (targets.length === 0) {
+            allToggle.checked = false;
+            allToggle.indeterminate = selectedAny;
+            allToggle.disabled = true;
+            return;
+          }
+          const checkedCount = targets.reduce((n, ent) => n + (ent.cb.checked ? 1 : 0), 0);
+          allToggle.disabled = false;
+          allToggle.checked = checkedCount === targets.length;
+          allToggle.indeterminate =
+            (checkedCount > 0 && checkedCount < targets.length)
+            || (checkedCount === 0 && selectedAny);
+        };
+
         const applyFilter = () => {
           const q = (filterInput.value || '').trim().toLowerCase();
+          const scope = scopeSelect.value || 'files';
+          const searchFiles = scope === 'files' || scope === 'both';
+          const searchFolders = scope === 'folders' || scope === 'both';
+          const folderMatch = new Map();
+          folderRows.forEach((meta, key) => {
+            if (!q) {
+              folderMatch.set(key, true);
+              return;
+            }
+            folderMatch.set(key, searchFolders && meta.folderNorm.includes(q));
+          });
+
           let visible = 0;
+          const visibleByFolder = new Map();
           for (const ent of entries) {
-            const match = !q || ent.nameNorm.includes(q);
-            ent.row.style.display = match ? '' : 'none';
-            if (match) visible += 1;
+            const selectionMatch =
+              selectionMode === 'all'
+                ? true
+                : selectionMode === 'selected'
+                  ? !!ent.cb.checked
+                  : !ent.cb.checked;
+            let searchMatch = true;
+            if (q) {
+              const fileMatch = searchFiles && ent.nameNorm.includes(q);
+              const folderMatched = !!folderMatch.get(ent.folderKey);
+              if (scope === 'files') searchMatch = fileMatch;
+              else if (scope === 'folders') searchMatch = folderMatched;
+              else searchMatch = fileMatch || folderMatched;
+            }
+            const visibleMatch = searchMatch && selectionMatch;
+            ent._searchMatch = searchMatch;
+            ent.row.style.display = visibleMatch ? '' : 'none';
+            if (visibleMatch) {
+              visible += 1;
+              visibleByFolder.set(ent.folderKey, (visibleByFolder.get(ent.folderKey) || 0) + 1);
+            }
           }
+
+          let visibleFolders = 0;
+          folderRows.forEach((meta, key) => {
+            const hasVisibleFiles = (visibleByFolder.get(key) || 0) > 0;
+            const show = hasVisibleFiles;
+            meta.row.style.display = show ? '' : 'none';
+            if (show) visibleFolders += 1;
+          });
+
+          const scopeLabel = scope === 'files' ? 'files' : (scope === 'folders' ? 'folders' : 'both');
+          const selLabel =
+            selectionMode === 'selected'
+              ? 'selected'
+              : selectionMode === 'unselected'
+                ? 'unselected'
+                : 'all';
           filterMeta.textContent = q
-            ? `Filter: ${visible}/${entries.length} visible`
-            : `All entries visible: ${entries.length}`;
+            ? `Filter (${scopeLabel}, ${selLabel}): files ${visible}/${entries.length}, folders ${visibleFolders}/${folderRows.size}`
+            : `Visible (${scopeLabel}, ${selLabel}): files ${visible}/${entries.length}, folders ${visibleFolders}/${folderRows.size}`;
           updateSummary();
+          syncAllToggleState();
         };
         filterInput.oninput = applyFilter;
+        scopeSelect.onchange = applyFilter;
         applyFilter();
 
         allToggle.onchange = () => {
           entries.forEach((ent) => {
             if (ent.cb.disabled) return;
-            if (ent.row.style.display === 'none') return;
+            if (!ent._searchMatch) return;
             ent.cb.checked = allToggle.checked;
+            refreshEntryVisual(ent);
           });
-          updateSummary();
+          syncFolderControls();
+          applyFilter();
         };
+
+        syncFolderControls();
 
         const cleanup = (answer) => {
           modal.classList.remove('show');
