@@ -79,6 +79,29 @@ def _format_bytes(num: int) -> str:
     return f"{value:.1f} PB"
 
 
+def _get_local_ipv4_addresses() -> list[str]:
+    addresses: set[str] = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                addresses.add(ip)
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                addresses.add(ip)
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return sorted(addresses)
+
+
 def _ensure_disk_space(required_bytes: int) -> None:
     free = shutil.disk_usage(UPLOAD_ROOT).free
     required = int(required_bytes * DISK_SPACE_FACTOR)
@@ -1404,49 +1427,142 @@ _HTML = r"""<!doctype html>
 """
 
 
-def run_server(port: int = 8040, per_client_limit: int = 1) -> None:
+def _parse_listen_endpoint(value: str) -> tuple[str, int]:
+    item = (value or "").strip()
+    if not item:
+        raise ValueError("Empty --listen value")
+    if ":" not in item:
+        raise ValueError(
+            f"Invalid --listen value '{value}'. Expected HOST:PORT (example: 0.0.0.0:8040)"
+        )
+    host_part, port_part = item.rsplit(":", 1)
+    host = host_part.strip() or "0.0.0.0"
+    try:
+        port = int(port_part.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid port in --listen value '{value}'") from exc
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Port out of range in --listen value '{value}'")
+    return (host, port)
+
+
+def _build_bind_endpoints(
+    host_args: list[str], port: int, listen_args: list[str]
+) -> list[tuple[str, int]]:
+    if not (1 <= int(port) <= 65535):
+        raise ValueError(f"--port must be in range 1-65535, got {port}")
+
+    endpoints: list[tuple[str, int]] = []
+    if listen_args:
+        for raw in listen_args:
+            for part in (raw or "").split(","):
+                item = part.strip()
+                if item:
+                    endpoints.append(_parse_listen_endpoint(item))
+    else:
+        hosts: list[str] = []
+        for raw in host_args:
+            for part in (raw or "").split(","):
+                item = part.strip()
+                if item:
+                    hosts.append(item)
+        if not hosts:
+            hosts = ["0.0.0.0"]
+        endpoints = [(h, int(port)) for h in hosts]
+
+    unique: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for endpoint in endpoints:
+        if endpoint not in seen:
+            seen.add(endpoint)
+            unique.append(endpoint)
+
+    for host, ep_port in unique:
+        try:
+            socket.getaddrinfo(host, ep_port, socket.AF_INET, socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError(
+                f"Invalid/unresolvable bind host '{host}' for port {ep_port}: {exc}"
+            ) from exc
+    return unique
+
+
+def run_server(
+    endpoints: list[tuple[str, int]], per_client_limit: int = 1
+) -> None:
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     STATE.set_per_ip_limit(per_client_limit)
 
-    ip_address = "127.0.0.1"
-    try:
-        ip_address = socket.gethostbyname(socket.gethostname())
-        if ip_address.startswith("127."):
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                s.connect(("8.8.8.8", 80))
-                ip_address = s.getsockname()[0]
-            finally:
-                s.close()
-    except Exception:
-        pass
+    local_ips = _get_local_ipv4_addresses()
+    primary_ip = local_ips[0] if local_ips else "127.0.0.1"
 
     print("\n" + "=" * 60)
     print("Upload server started")
     print("=" * 60)
     print(f"Python:         {platform.python_version()}")
     print(f"OS:             {platform.system()}")
-    print(f"IP address:     {ip_address}")
-    print(f"Port:           {port}")
+    print(f"Primary IP:     {primary_ip}")
+    if local_ips:
+        print(f"Local IPv4s:    {', '.join(local_ips)}")
     print(f"Per-client limit: {max(1, int(per_client_limit))}")
+    print("Bindings:")
+    for host, port in endpoints:
+        print(f"  - {host}:{port}")
     print("\nAccess URLs:")
-    print(f"  Local:    http://localhost:{port}")
-    print(f"  Network:  http://{ip_address}:{port}")
+    for host, port in endpoints:
+        if host in ("", "0.0.0.0"):
+            print(f"  Local:    http://localhost:{port}")
+            for ip in local_ips[:5]:
+                print(f"  Network:  http://{ip}:{port}")
+        else:
+            print(f"  Host:     http://{host}:{port}")
     print(f"\nStorage path: {UPLOAD_ROOT}")
     print("To stop: Ctrl+C")
     print("=" * 60 + "\n")
 
-    server = ThreadingHTTPServer(("", port), SimpleUploadServer)
+    servers: list[ThreadingHTTPServer] = []
+    for host, port in endpoints:
+        try:
+            servers.append(ThreadingHTTPServer((host, port), SimpleUploadServer))
+        except OSError as exc:
+            print(f"Failed to bind {host}:{port} -> {exc}")
+
+    if not servers:
+        raise SystemExit("No server socket could be started. Check host/port values.")
+
+    threads: list[threading.Thread] = []
+    for server in servers:
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        threads.append(t)
+
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nShutting down server...")
-        server.server_close()
+        for server in servers:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Local upload server (streaming, queue-based, LAN-first)."
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        action="append",
+        default=[],
+        help="Host/IP to bind with --port. Repeatable or comma-separated (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--listen",
+        type=str,
+        action="append",
+        default=[],
+        help="Full bind endpoint HOST:PORT. Repeatable or comma-separated.",
     )
     parser.add_argument(
         "-p",
@@ -1462,4 +1578,11 @@ if __name__ == "__main__":
         help="Max simultaneous uploads per client IP (default: 1)",
     )
     args = parser.parse_args()
-    run_server(port=args.port, per_client_limit=max(1, args.per_client_limit))
+    try:
+        endpoints = _build_bind_endpoints(args.host, args.port, args.listen)
+    except ValueError as exc:
+        parser.error(str(exc))
+    run_server(
+        endpoints=endpoints,
+        per_client_limit=max(1, args.per_client_limit),
+    )

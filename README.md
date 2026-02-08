@@ -41,17 +41,37 @@ python ./2025_12_python_upload_webserver.py
 
 ## CLI Options
 
-- `-p`, `--port`: choose server port (default: `8040`)
+- `--host`: host/IP to bind with `--port` (repeatable or comma-separated, default: `0.0.0.0`)
+- `-p`, `--port`: port used with `--host` (default: `8040`)
+- `--listen`: full bind endpoint `HOST:PORT` (repeatable or comma-separated)
 - `--per-client-limit`: max simultaneous uploads per client IP (default: `1`)
 
 Examples:
 
 ```powershell
-python .\2025_12_python_upload_webserver.py --port 9000 --per-client-limit 2
+python .\2025_12_python_upload_webserver.py --host 192.168.1.50 --port 9000 --per-client-limit 2
 ```
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --port 9000 --per-client-limit 2
+python3 ./2025_12_python_upload_webserver.py --host 192.168.1.50 --port 9000 --per-client-limit 2
+```
+
+Multiple interfaces with one port:
+
+```bash
+python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1 --host 192.168.1.50 --port 8040
+```
+
+Multiple independent sockets (host + port pairs):
+
+```bash
+python3 ./2025_12_python_upload_webserver.py --listen 127.0.0.1:8040 --listen 192.168.1.50:9000
+```
+
+Only localhost:
+
+```bash
+python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1
 ```
 
 ## Access
