@@ -3,6 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import argparse
 import ctypes
 import datetime as _dt
 import hashlib
@@ -83,8 +84,8 @@ def _ensure_disk_space(required_bytes: int) -> None:
     required = int(required_bytes * DISK_SPACE_FACTOR)
     if free < required:
         raise ValueError(
-            f"Nicht genug Speicherplatz. Benötigt: {_format_bytes(required)}, "
-            f"Verfügbar: {_format_bytes(free)}"
+            f"Not enough disk space. Required: {_format_bytes(required)}, "
+            f"Available: {_format_bytes(free)}"
         )
 
 
@@ -107,15 +108,15 @@ def _sanitize_rel_path(raw: str) -> str:
         if part in ("", "."):
             continue
         if part == "..":
-            raise ValueError("Ungültiger Pfad (..)")
+            raise ValueError("Invalid path (..)")
         parts.append(_sanitize_name_part(part))
     if not parts:
-        raise ValueError("Leerer Dateipfad")
+        raise ValueError("Empty file path")
     return "/".join(parts)
 
 
 def _path_key(rel_path: str) -> str:
-    # Windows-Dateisystem ist standardmäßig case-insensitive.
+    # Windows file system is typically case-insensitive.
     return rel_path.lower() if os.name == "nt" else rel_path
 
 
@@ -126,6 +127,14 @@ class _ServerState:
         self._sessions: dict[str, dict] = {}
         self._ip_semaphores: dict[str, threading.Semaphore] = {}
         self._reserved_paths: dict[str, str] = {}
+        self._per_ip_limit = 1
+
+    def set_per_ip_limit(self, limit: int) -> None:
+        safe_limit = max(1, int(limit))
+        with self._lock:
+            self._per_ip_limit = safe_limit
+            # Recreate lazily with the new limit.
+            self._ip_semaphores = {}
 
     def note_client(self, ip: str) -> bool:
         with self._lock:
@@ -138,7 +147,7 @@ class _ServerState:
         with self._lock:
             sem = self._ip_semaphores.get(ip)
             if sem is None:
-                sem = threading.Semaphore(1)
+                sem = threading.Semaphore(self._per_ip_limit)
                 self._ip_semaphores[ip] = sem
             return sem
 
@@ -245,7 +254,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         ip = self._client_ip()
         ua = self.headers.get("User-Agent")
         if STATE.note_client(ip):
-            details = f"Neuer Client: ip={ip}"
+            details = f"New client: ip={ip}"
             if ua:
                 details += f" ua={ua}"
             self._log(details, color=_ANSI_GREEN)
@@ -270,7 +279,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         if length <= 0:
             return b""
         if length > max_bytes:
-            raise ValueError("Request zu groß")
+            raise ValueError("Request too large")
         data = self.rfile.read(length)
         if len(data) != length:
             raise ConnectionError("Client disconnected")
@@ -306,7 +315,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             if not upload_id or not isinstance(upload_id, str):
                 raise ValueError("upload_id fehlt")
             if not re.fullmatch(r"[A-Za-z0-9._-]{6,80}", upload_id):
-                raise ValueError("upload_id ungültig")
+                raise ValueError("invalid upload_id")
             if not isinstance(items, list) or not items:
                 raise ValueError("items fehlt/leer")
 
@@ -337,7 +346,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
 
                 dest_path = (UPLOAD_ROOT / rel_path).resolve()
                 if UPLOAD_ROOT not in dest_path.parents and dest_path != UPLOAD_ROOT:
-                    raise ValueError("Ungültiger Zielpfad")
+                    raise ValueError("invalid target path")
                 if dest_path.exists():
                     conflicts.append(
                         {"path": raw_path, "rel_path": rel_path, "reason": "exists"}
@@ -378,7 +387,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         ip = self._client_ip()
         sem = STATE.get_ip_semaphore(ip)
         if not sem.acquire(blocking=False):
-            self._send_json(429, {"ok": False, "error": "Upload bereits aktiv (Queue nutzen)"})
+            self._send_json(429, {"ok": False, "error": "Upload already active (use queue)"})
             return
 
         temp_path: Path | None = None
@@ -397,14 +406,14 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
             if not upload_id or not re.fullmatch(r"[A-Za-z0-9._-]{6,80}", upload_id):
-                raise ValueError("upload_id ungültig")
+                raise ValueError("invalid upload_id")
             rel_path = _sanitize_rel_path(raw_path)
             if on_exists not in {"skip", "overwrite"}:
                 on_exists = "skip"
 
             content_length = int(self.headers.get("Content-Length", "0") or "0")
             if content_length < 0:
-                raise ValueError("Content-Length ungültig")
+                raise ValueError("invalid Content-Length")
             _ensure_disk_space(content_length)
 
             session = STATE.get_session(upload_id)
@@ -412,7 +421,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 ua = session.get("user_agent")
                 ua_part = f" ua={ua}" if ua else ""
                 self._log(
-                    f"Upload gestartet: id={upload_id} ip={ip} "
+                    f"Upload started: id={upload_id} ip={ip} "
                     f"files={session.get('total_files')} total={_format_bytes(int(session.get('total_bytes') or 0))}{ua_part}",
                     color=_ANSI_YELLOW,
                 )
@@ -420,7 +429,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
 
             dest_path = (UPLOAD_ROOT / rel_path).resolve()
             if UPLOAD_ROOT not in dest_path.parents and dest_path != UPLOAD_ROOT:
-                raise ValueError("Ungültiger Zielpfad")
+                raise ValueError("invalid target path")
             dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             if not STATE.reserve_path(rel_path, upload_id):
@@ -432,7 +441,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             path_reserved = True
 
             if dest_path.exists() and dest_path.is_dir():
-                raise ValueError("Zielpfad ist ein Ordner")
+                raise ValueError("target path is a directory")
 
             if dest_path.exists() and on_exists == "skip":
                 self._send_json(
@@ -497,7 +506,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     pass
             reason = str(e) or "Client disconnected"
             self._log(
-                f"Upload abgebrochen: id={upload_id or '?'} ip={ip} path={rel_path or '?'} reason={reason}",
+                f"Upload aborted: id={upload_id or '?'} ip={ip} path={rel_path or '?'} reason={reason}",
                 color=_ANSI_YELLOW,
             )
         except Exception as e:
@@ -506,7 +515,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     temp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
                 except Exception:
                     pass
-            self._log(f"Upload-Fehler: ip={ip} err={e}", color=_ANSI_RED)
+            self._log(f"Upload error: ip={ip} err={e}", color=_ANSI_RED)
             try:
                 self._send_json(500, {"ok": False, "error": str(e)})
             except BrokenPipeError:
@@ -707,15 +716,15 @@ _HTML = r"""<!doctype html>
 <body>
   <div class="wrap">
     <h1>Lokaler Upload Server</h1>
-    <div class="hint">Standard: 1 Upload gleichzeitig pro Browser. Weitere Uploads werden in die Queue gelegt.</div>
+    <div class="hint">Default: 1 active upload per browser. Additional uploads are queued.</div>
 
     <div class="grid">
       <div class="card">
-        <h2>Dateien (mehrfach möglich)</h2>
+        <h2>Files (multi-select)</h2>
         <form id="singleFileForm">
           <input type="file" id="singleFile" multiple />
           <div class="row">
-            <button class="btn" type="submit">Zur Queue hinzufügen</button>
+            <button class="btn" type="submit">Add to queue</button>
           </div>
           <div class="meta" id="singleFileInfo"></div>
           <div class="meta" id="singleFileWarn"></div>
@@ -723,11 +732,11 @@ _HTML = r"""<!doctype html>
       </div>
 
       <div class="card">
-        <h2>Ordner (inkl. Struktur)</h2>
+        <h2>Folder (keep structure)</h2>
         <form id="folderForm">
           <input type="file" id="folderInput" webkitdirectory directory multiple />
           <div class="row">
-            <button class="btn" type="submit">Zur Queue hinzufügen</button>
+            <button class="btn" type="submit">Add to queue</button>
           </div>
           <div class="meta" id="folderFileInfo"></div>
           <div class="meta" id="folderWarn"></div>
@@ -737,14 +746,14 @@ _HTML = r"""<!doctype html>
 
     <div class="card" style="margin-top:14px;">
       <h2>Queue</h2>
-      <div class="hint" id="queueEmpty">Noch keine Uploads.</div>
+      <div class="hint" id="queueEmpty">No uploads yet.</div>
       <div class="meta error" id="pageError" style="display:none;"></div>
       <ul class="queue" id="queueList"></ul>
     </div>
 
     <div class="card" style="margin-top:14px;">
-      <h2>Aktiver Upload</h2>
-      <div class="hint" id="activeHint">Kein aktiver Upload. Session: <span id="sessionTotal">0 B</span> hochgeladen.</div>
+      <h2>Active Upload</h2>
+      <div class="hint" id="activeHint">No active upload. Session uploaded: <span id="sessionTotal">0 B</span>.</div>
       <div id="activeBox" style="display:none;">
         <div class="qtitle" id="activeTitle"></div>
         <div class="qsub mono" id="activeSub"></div>
@@ -761,19 +770,19 @@ _HTML = r"""<!doctype html>
 
   <div class="modal" id="conflictModal" aria-hidden="true">
     <div class="modalCard">
-      <div class="qtitle">Dateien existieren bereits</div>
+      <div class="qtitle">Existing files detected</div>
       <div class="hint" id="conflictText"></div>
       <div class="row">
         <label class="qsub mono" style="display:flex; align-items:center; gap:8px;">
           <input type="checkbox" id="conflictAll" />
-          Alle überschreiben
+          Overwrite all
         </label>
       </div>
       <div class="confList mono" id="conflictList"></div>
       <div class="confSummary" id="conflictSummary"></div>
       <div class="row">
-        <button class="btn" id="conflictOkBtn" type="button">Fortsetzen</button>
-        <button class="btn danger" id="cancelBtn" type="button">Abbrechen</button>
+        <button class="btn" id="conflictOkBtn" type="button">Continue</button>
+        <button class="btn danger" id="cancelBtn" type="button">Cancel</button>
       </div>
     </div>
   </div>
@@ -822,7 +831,7 @@ _HTML = r"""<!doctype html>
       if (!files || files.length === 0) return '';
       let total = 0;
       for (const f of files) total += (f.size || 0);
-      return `${files.length} Datei(en), ${formatBytes(total)}`;
+      return `${files.length} file(s), ${formatBytes(total)}`;
     }
 
     function formatDuration(sec) {
@@ -887,12 +896,12 @@ _HTML = r"""<!doctype html>
         const pct = job.totalBytes > 0 ? Math.floor((job.uploadedBytes / job.totalBytes) * 100) : 0;
         let extra = '';
         if (job.status === 'uploading') extra = ` • ${pct}%`;
-        if (job.status === 'preflight') extra = ' • prüfe...';
-        if (job.status === 'error') extra = ` • ${job.error || 'Fehler'}`;
-        if (job.status === 'canceled') extra = ` • ${job.error || 'Abgebrochen'}`;
+        if (job.status === 'preflight') extra = ' • checking...';
+        if (job.status === 'error') extra = ` • ${job.error || 'Error'}`;
+        if (job.status === 'canceled') extra = ` • ${job.error || 'Canceled'}`;
         if (job.status === 'done' && job.error) extra = ` • ${job.error}`;
         const dur = job.durationSec ? ` • ${formatDuration(job.durationSec)}` : '';
-        sub.textContent = `${job.items.length} Datei(en), ${formatBytes(job.totalBytes)}${extra}${dur}`;
+        sub.textContent = `${job.items.length} file(s), ${formatBytes(job.totalBytes)}${extra}${dur}`;
 
         left.appendChild(title);
         left.appendChild(sub);
@@ -905,7 +914,7 @@ _HTML = r"""<!doctype html>
           const btn = document.createElement('button');
           btn.className = 'btn danger';
           btn.type = 'button';
-          btn.textContent = 'Entfernen';
+          btn.textContent = 'Remove';
           btn.onclick = () => {
             const idx = queue.indexOf(job);
             if (idx >= 0) queue.splice(idx, 1);
@@ -916,7 +925,7 @@ _HTML = r"""<!doctype html>
           const btn = document.createElement('button');
           btn.className = 'btn secondary';
           btn.type = 'button';
-          btn.textContent = 'Ausblenden';
+          btn.textContent = 'Hide';
           btn.onclick = () => {
             const idx = queue.indexOf(job);
             if (idx >= 0) queue.splice(idx, 1);
@@ -961,7 +970,7 @@ _HTML = r"""<!doctype html>
       const oElapsed = totals.startedAt ? (performance.now() - totals.startedAt) / 1000 : 0;
       const oRemaining = totals.speedBps > 0 ? Math.max(0, (totals.totalBytes - totals.uploadedBytes) / totals.speedBps) : 0;
       $('overallStats').textContent =
-        `Gesamt: ${formatBytes(totals.uploadedBytes)} / ${formatBytes(totals.totalBytes)} • ${formatSpeed(totals.speedBps)} • ` +
+        `Overall: ${formatBytes(totals.uploadedBytes)} / ${formatBytes(totals.totalBytes)} • ${formatSpeed(totals.speedBps)} • ` +
         `elapsed ${formatDuration(oElapsed)} • eta ${oRemaining ? formatDuration(oRemaining) : '--'}`;
     }
 
@@ -989,12 +998,12 @@ _HTML = r"""<!doctype html>
           const tag = document.createElement('div');
           const reason = c.reason || 'exists';
           const locked = reason === 'in_progress' || reason === 'duplicate_in_request';
-          tag.textContent = locked ? 'läuft gerade' : 'behalten';
+          tag.textContent = locked ? 'in progress' : 'keep';
 
           const updateRow = () => {
             const isOn = cb.checked;
             row.className = `confRow ${isOn ? 'overwrite' : 'skip'}`;
-            tag.textContent = locked ? 'läuft gerade' : (isOn ? 'überschreiben' : 'behalten');
+            tag.textContent = locked ? 'in progress' : (isOn ? 'overwrite' : 'keep');
             updateSummary();
           };
 
@@ -1011,18 +1020,18 @@ _HTML = r"""<!doctype html>
         }
         if (conflicts.length > maxShow) {
           const div = document.createElement('div');
-          div.textContent = `... und ${conflicts.length - maxShow} weitere`;
+          div.textContent = `... and ${conflicts.length - maxShow} more`;
           list.appendChild(div);
         }
 
-        text.textContent = `${conflicts.length} Konflikt(e) gefunden. Was soll passieren?`;
+        text.textContent = `${conflicts.length} conflict(s) found. Choose what to do.`;
         modal.classList.add('show');
 
         const updateSummary = () => {
           let overwrite = 0;
           for (const ent of entries) if (ent.cb.checked) overwrite++;
           const keep = entries.length - overwrite;
-          summary.textContent = `Überschreiben: ${overwrite} • Behalten: ${keep}`;
+          summary.textContent = `Overwrite: ${overwrite} • Keep: ${keep}`;
         };
         updateSummary();
 
@@ -1072,7 +1081,7 @@ _HTML = r"""<!doctype html>
         return data;
       } catch (err) {
         const msg = (err && err.message) ? err.message : String(err);
-        showPageError(`Preflight fehlgeschlagen: ${msg}`);
+        showPageError(`Preflight failed: ${msg}`);
         return { ok: false, error: msg };
       }
     }
@@ -1098,11 +1107,11 @@ _HTML = r"""<!doctype html>
       job.items = uniqueItems;
       job.totalBytes = job.items.reduce((a, it) => a + (it.file.size || 0), 0);
       if (skippedDuplicates > 0) {
-        showPageError(`${skippedDuplicates} Datei(en) übersprungen: Zielpfad bereits in Queue/Upload.`);
+        showPageError(`${skippedDuplicates} file(s) skipped: target path already in queue/upload.`);
       }
       if (job.items.length === 0) {
         job.status = 'done';
-        job.error = 'Nichts neu in Queue (nur Duplikate).';
+        job.error = 'Nothing new in queue (duplicates only).';
         queue.push(job);
         renderQueue();
         return;
@@ -1123,7 +1132,7 @@ _HTML = r"""<!doctype html>
         const choice = await showConflictDialog(conflicts);
         if (!choice || choice.action === 'cancel') {
           job.status = 'canceled';
-          job.error = 'Abgebrochen (vor Upload)';
+          job.error = 'Canceled (before upload)';
           renderQueue();
           return;
         }
@@ -1146,7 +1155,7 @@ _HTML = r"""<!doctype html>
         job.totalBytes = job.items.reduce((a, it) => a + (it.file.size || 0), 0);
         if (job.items.length === 0) {
           job.status = 'done';
-          job.error = 'Alle Dateien existieren bereits (nichts hochzuladen)';
+          job.error = 'All files already exist (nothing to upload)';
           renderQueue();
           return;
         }
@@ -1208,8 +1217,8 @@ _HTML = r"""<!doctype html>
           }
           resolve(resp);
         };
-        xhr.onerror = () => reject(new Error('Netzwerkfehler beim Upload'));
-        xhr.onabort = () => reject(new Error('Upload abgebrochen'));
+        xhr.onerror = () => reject(new Error('Network error during upload'));
+        xhr.onabort = () => reject(new Error('Upload canceled'));
         xhr.send(item.file);
       });
     }
@@ -1291,7 +1300,7 @@ _HTML = r"""<!doctype html>
     $('abortBtn').addEventListener('click', () => {
       if (!activeJob) return;
       activeJob.status = 'canceled';
-      activeJob.error = 'Abgebrochen';
+      activeJob.error = 'Canceled';
       if (activeXhr) activeXhr.abort();
       setActiveUI(null);
       renderQueue();
@@ -1316,7 +1325,7 @@ _HTML = r"""<!doctype html>
       const input = $('singleFile');
       const files = input.files ? Array.from(input.files) : [];
       if (!files.length) {
-        $('singleFileWarn').textContent = 'Bitte zuerst eine Datei auswählen.';
+        $('singleFileWarn').textContent = 'Please select at least one file first.';
         $('singleFileWarn').className = 'meta warn';
         input.classList.add('warn');
         return;
@@ -1325,8 +1334,8 @@ _HTML = r"""<!doctype html>
       const total = files.reduce((a, f) => a + (f.size || 0), 0);
       const label =
         files.length === 1
-          ? `Datei: ${files[0].name}`
-          : `Dateien: ${files.length} (${files[0].name} ...)`;
+          ? `File: ${files[0].name}`
+          : `Files: ${files.length} (${files[0].name} ...)`;
 
       const job = {
         id: newId().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 72),
@@ -1351,19 +1360,19 @@ _HTML = r"""<!doctype html>
       const input = $('folderInput');
       const files = input.files ? Array.from(input.files) : [];
       if (!files.length) {
-        $('folderWarn').textContent = 'Bitte zuerst einen Ordner auswählen.';
+        $('folderWarn').textContent = 'Please select a folder first.';
         $('folderWarn').className = 'meta warn';
         input.classList.add('warn');
         return;
       }
 
-      const root = (files[0].webkitRelativePath || '').split('/')[0] || 'Ordner';
+      const root = (files[0].webkitRelativePath || '').split('/')[0] || 'Folder';
       const items = files.map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
       const total = items.reduce((a, it) => a + (it.file.size || 0), 0);
 
       const job = {
         id: newId().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 72),
-        label: `Ordner: ${root}`,
+        label: `Folder: ${root}`,
         kind: 'folder',
         items,
         totalBytes: total,
@@ -1379,11 +1388,11 @@ _HTML = r"""<!doctype html>
     });
 
     window.addEventListener('error', (e) => {
-      showPageError(`JS Fehler: ${e.message || e.type}`);
+      showPageError(`JS error: ${e.message || e.type}`);
     });
     window.addEventListener('unhandledrejection', (e) => {
       const reason = e && e.reason ? (e.reason.message || String(e.reason)) : 'unknown';
-      showPageError(`JS Fehler: ${reason}`);
+      showPageError(`JS error: ${reason}`);
     });
 
     renderQueue();
@@ -1395,8 +1404,9 @@ _HTML = r"""<!doctype html>
 """
 
 
-def run_server(port: int = 8040) -> None:
+def run_server(port: int = 8040, per_client_limit: int = 1) -> None:
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    STATE.set_per_ip_limit(per_client_limit)
 
     ip_address = "127.0.0.1"
     try:
@@ -1412,26 +1422,44 @@ def run_server(port: int = 8040) -> None:
         pass
 
     print("\n" + "=" * 60)
-    print("Upload-Server gestartet")
+    print("Upload server started")
     print("=" * 60)
     print(f"Python:         {platform.python_version()}")
-    print(f"Betriebssystem: {platform.system()}")
-    print(f"IP-Adresse:     {ip_address}")
+    print(f"OS:             {platform.system()}")
+    print(f"IP address:     {ip_address}")
     print(f"Port:           {port}")
-    print("\nZugriffs-URLs:")
-    print(f"  Lokal:    http://localhost:{port}")
-    print(f"  Netzwerk: http://{ip_address}:{port}")
-    print(f"\nSpeicherort: {UPLOAD_ROOT}")
-    print("Zum Beenden: Strg+C")
+    print(f"Per-client limit: {max(1, int(per_client_limit))}")
+    print("\nAccess URLs:")
+    print(f"  Local:    http://localhost:{port}")
+    print(f"  Network:  http://{ip_address}:{port}")
+    print(f"\nStorage path: {UPLOAD_ROOT}")
+    print("To stop: Ctrl+C")
     print("=" * 60 + "\n")
 
     server = ThreadingHTTPServer(("", port), SimpleUploadServer)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nServer wird beendet...")
+        print("\nShutting down server...")
         server.server_close()
 
 
 if __name__ == "__main__":
-    run_server()
+    parser = argparse.ArgumentParser(
+        description="Local upload server (streaming, queue-based, LAN-first)."
+    )
+    parser.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=8040,
+        help="TCP port to listen on (default: 8040)",
+    )
+    parser.add_argument(
+        "--per-client-limit",
+        type=int,
+        default=1,
+        help="Max simultaneous uploads per client IP (default: 1)",
+    )
+    args = parser.parse_args()
+    run_server(port=args.port, per_client_limit=max(1, args.per_client_limit))
