@@ -21,6 +21,12 @@ UPLOAD_ROOT = Path("uploads").resolve()
 BUFFER_SIZE = 8 * 1024 * 1024
 MAX_PREFLIGHT_BYTES = 20 * 1024 * 1024
 DISK_SPACE_FACTOR = 1.1
+DEFAULT_BIND_HOST = "0.0.0.0"
+DEFAULT_PORT = 8040
+DEFAULT_PER_CLIENT_LIMIT = 1
+DEFAULT_RETRY_COUNT = 2
+DEFAULT_RETRY_DELAY_MS = 800
+DEFAULT_UPLOAD_TIMEOUT_SEC = 0
 
 _INVALID_NAME_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
 _RESERVED_NAMES = {
@@ -255,6 +261,19 @@ class _ServerState:
 
 
 STATE = _ServerState()
+_HTML_CONFIG = {
+    "max_file_retries": DEFAULT_RETRY_COUNT,
+    "retry_delay_ms": DEFAULT_RETRY_DELAY_MS,
+    "upload_timeout_ms": DEFAULT_UPLOAD_TIMEOUT_SEC * 1000,
+}
+
+
+def _render_html() -> str:
+    html = _HTML_TEMPLATE
+    html = html.replace("__MAX_FILE_RETRIES__", str(int(_HTML_CONFIG["max_file_retries"])))
+    html = html.replace("__RETRY_BASE_DELAY_MS__", str(int(_HTML_CONFIG["retry_delay_ms"])))
+    html = html.replace("__UPLOAD_TIMEOUT_MS__", str(int(_HTML_CONFIG["upload_timeout_ms"])))
+    return html
 
 
 class SimpleUploadServer(BaseHTTPRequestHandler):
@@ -313,7 +332,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/":
             self._send_json(404, {"ok": False, "error": "not_found"})
             return
-        self._send_bytes(200, _HTML.encode("utf-8"), "text/html; charset=utf-8")
+        self._send_bytes(200, _render_html().encode("utf-8"), "text/html; charset=utf-8")
 
     def do_POST(self) -> None:
         self._note_client_if_new()
@@ -552,12 +571,12 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 pass
 
 
-_HTML = r"""<!doctype html>
-<html lang="de">
+_HTML_TEMPLATE = r"""<!doctype html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Lokaler Upload Server</title>
+  <title>Local Upload Server</title>
   <style>
     :root {
       --bg: #0b1220;
@@ -722,6 +741,21 @@ _HTML = r"""<!doctype html>
       color: var(--muted);
     }
     .confList div { margin: 4px 0; }
+    .confTools {
+      display: grid;
+      gap: 8px;
+    }
+    .confFilter {
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,.04);
+      color: var(--text);
+      outline: none;
+    }
+    .confFilter::placeholder { color: var(--muted); }
+    .confFilterMeta { color: var(--muted); font-size: 12px; }
     .confRow {
       display: grid;
       grid-template-columns: 18px 1fr auto;
@@ -738,7 +772,7 @@ _HTML = r"""<!doctype html>
 </head>
 <body>
   <div class="wrap">
-    <h1>Lokaler Upload Server</h1>
+    <h1>Local Upload Server</h1>
     <div class="hint">Default: 1 active upload per browser. Additional uploads are queued.</div>
 
     <div class="grid">
@@ -801,6 +835,10 @@ _HTML = r"""<!doctype html>
           Overwrite all
         </label>
       </div>
+      <div class="confTools">
+        <input class="confFilter mono" id="conflictFilter" type="text" placeholder="Filter by path..." />
+        <div class="confFilterMeta mono" id="conflictFilterMeta"></div>
+      </div>
       <div class="confList mono" id="conflictList"></div>
       <div class="confSummary" id="conflictSummary"></div>
       <div class="row">
@@ -819,6 +857,10 @@ _HTML = r"""<!doctype html>
     let activeJob = null;
     let activeXhr = null;
     let sessionUploadedBytes = 0;
+    const MAX_FILE_RETRIES = __MAX_FILE_RETRIES__;
+    const RETRY_BASE_DELAY_MS = __RETRY_BASE_DELAY_MS__;
+    const UPLOAD_TIMEOUT_MS = __UPLOAD_TIMEOUT_MS__;
+    const actionLocks = new Set();
 
     function formatBytes(bytes) {
       const n = Number(bytes || 0);
@@ -855,6 +897,20 @@ _HTML = r"""<!doctype html>
       let total = 0;
       for (const f of files) total += (f.size || 0);
       return `${files.length} file(s), ${formatBytes(total)}`;
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function withActionLock(key, fn, lockMs = 280) {
+      if (actionLocks.has(key)) return;
+      actionLocks.add(key);
+      try {
+        fn();
+      } finally {
+        setTimeout(() => actionLocks.delete(key), lockMs);
+      }
     }
 
     function formatDuration(sec) {
@@ -917,14 +973,32 @@ _HTML = r"""<!doctype html>
         const sub = document.createElement('div');
         sub.className = 'qsub mono';
         const pct = job.totalBytes > 0 ? Math.floor((job.uploadedBytes / job.totalBytes) * 100) : 0;
+        const infoBits = [];
+        if (Number.isFinite(job.selectedCount) && job.selectedCount > 0) {
+          infoBits.push(`selected ${job.selectedCount}`);
+        }
+        if (Number.isFinite(job.existsCount) && job.existsCount > 0) {
+          infoBits.push(`already on server ${job.existsCount}`);
+        }
+        if (Number.isFinite(job.inProgressCount) && job.inProgressCount > 0) {
+          infoBits.push(`currently uploading ${job.inProgressCount}`);
+        }
+        if (Number.isFinite(job.queuedDupCount) && job.queuedDupCount > 0) {
+          infoBits.push(`already in queue ${job.queuedDupCount}`);
+        }
+        if (Number.isFinite(job.duplicateInSelectionCount) && job.duplicateInSelectionCount > 0) {
+          infoBits.push(`duplicate in selection ${job.duplicateInSelectionCount}`);
+        }
+        const infoPrefix = infoBits.length ? `${infoBits.join(' • ')} • ` : '';
         let extra = '';
         if (job.status === 'uploading') extra = ` • ${pct}%`;
         if (job.status === 'preflight') extra = ' • checking...';
         if (job.status === 'error') extra = ` • ${job.error || 'Error'}`;
         if (job.status === 'canceled') extra = ` • ${job.error || 'Canceled'}`;
         if (job.status === 'done' && job.error) extra = ` • ${job.error}`;
+        if (job.failedCount) extra += ` • failed ${job.failedCount}`;
         const dur = job.durationSec ? ` • ${formatDuration(job.durationSec)}` : '';
-        sub.textContent = `${job.items.length} file(s), ${formatBytes(job.totalBytes)}${extra}${dur}`;
+        sub.textContent = `${infoPrefix}${job.items.length} file(s), ${formatBytes(job.totalBytes)}${extra}${dur}`;
 
         left.appendChild(title);
         left.appendChild(sub);
@@ -938,21 +1012,41 @@ _HTML = r"""<!doctype html>
           btn.className = 'btn danger';
           btn.type = 'button';
           btn.textContent = 'Remove';
-          btn.onclick = () => {
-            const idx = queue.indexOf(job);
-            if (idx >= 0) queue.splice(idx, 1);
-            renderQueue();
+          btn.onclick = (ev) => {
+            const target = ev && ev.currentTarget ? ev.currentTarget : null;
+            if (target) target.disabled = true;
+            withActionLock(`remove:${job.id}`, () => {
+              const idx = queue.indexOf(job);
+              if (idx >= 0) queue.splice(idx, 1);
+              renderQueue();
+            });
           };
           actions.appendChild(btn);
         } else if (job.status === 'done' || job.status === 'error' || job.status === 'canceled') {
+          if ((job.status === 'error' || job.status === 'canceled') && (job.items || []).some(it => !it.done && !it.skipped)) {
+            const retryBtn = document.createElement('button');
+            retryBtn.className = 'btn';
+            retryBtn.type = 'button';
+            retryBtn.textContent = 'Retry';
+            retryBtn.onclick = (ev) => {
+              const target = ev && ev.currentTarget ? ev.currentTarget : null;
+              if (target) target.disabled = true;
+              withActionLock(`retry:${job.id}`, () => retryJob(job), 420);
+            };
+            actions.appendChild(retryBtn);
+          }
           const btn = document.createElement('button');
           btn.className = 'btn secondary';
           btn.type = 'button';
           btn.textContent = 'Hide';
-          btn.onclick = () => {
-            const idx = queue.indexOf(job);
-            if (idx >= 0) queue.splice(idx, 1);
-            renderQueue();
+          btn.onclick = (ev) => {
+            const target = ev && ev.currentTarget ? ev.currentTarget : null;
+            if (target) target.disabled = true;
+            withActionLock(`hide:${job.id}`, () => {
+              const idx = queue.indexOf(job);
+              if (idx >= 0) queue.splice(idx, 1);
+              renderQueue();
+            });
           };
           actions.appendChild(btn);
         }
@@ -997,20 +1091,22 @@ _HTML = r"""<!doctype html>
         `elapsed ${formatDuration(oElapsed)} • eta ${oRemaining ? formatDuration(oRemaining) : '--'}`;
     }
 
-    function showConflictDialog(conflicts) {
+    function showConflictDialog(conflicts, summaryInfo = null) {
       return new Promise((resolve) => {
         const modal = $('conflictModal');
         const list = $('conflictList');
         const text = $('conflictText');
         const allToggle = $('conflictAll');
         const summary = $('conflictSummary');
+        const filterInput = $('conflictFilter');
+        const filterMeta = $('conflictFilterMeta');
         list.textContent = '';
         allToggle.checked = false;
+        filterInput.value = '';
 
-        const maxShow = 200;
-        const show = conflicts.slice(0, maxShow);
         const entries = [];
-        for (const c of show) {
+        const fragment = document.createDocumentFragment();
+        for (const c of conflicts) {
           const row = document.createElement('label');
           row.className = 'confRow skip';
           const cb = document.createElement('input');
@@ -1038,33 +1134,77 @@ _HTML = r"""<!doctype html>
           row.appendChild(cb);
           row.appendChild(name);
           row.appendChild(tag);
-          list.appendChild(row);
-          entries.push({ cb, path: c.path, rel_path: c.rel_path });
+          fragment.appendChild(row);
+          entries.push({
+            cb,
+            row,
+            path: c.path,
+            rel_path: c.rel_path,
+            nameNorm: (c.rel_path || c.path || '').toLowerCase(),
+          });
         }
-        if (conflicts.length > maxShow) {
-          const div = document.createElement('div');
-          div.textContent = `... and ${conflicts.length - maxShow} more`;
-          list.appendChild(div);
-        }
+        list.appendChild(fragment);
 
-        text.textContent = `${conflicts.length} conflict(s) found. Choose what to do.`;
+        const existsCount = conflicts.filter(c => (c.reason || 'exists') === 'exists').length;
+        const inProgressCount = conflicts.filter(c => c.reason === 'in_progress').length;
+        const dupReqCount = conflicts.filter(c => c.reason === 'duplicate_in_request').length;
+        const selectedCount = summaryInfo && Number.isFinite(summaryInfo.selectedCount)
+          ? Number(summaryInfo.selectedCount)
+          : null;
+        const queuedDupCount = summaryInfo && Number.isFinite(summaryInfo.queuedDupCount)
+          ? Number(summaryInfo.queuedDupCount)
+          : 0;
+        const infoParts = [];
+        if (selectedCount !== null) infoParts.push(`selected: ${selectedCount}`);
+        if (existsCount > 0) infoParts.push(`already on server: ${existsCount}`);
+        if (inProgressCount > 0) infoParts.push(`currently uploading: ${inProgressCount}`);
+        if (queuedDupCount > 0) infoParts.push(`already in queue: ${queuedDupCount}`);
+        if (dupReqCount > 0) infoParts.push(`duplicate in selection: ${dupReqCount}`);
+        const summaryText = infoParts.length ? ` (${infoParts.join(' • ')})` : '';
+        text.textContent = `${conflicts.length} conflict(s) found${summaryText}. Choose what to do.`;
         modal.classList.add('show');
 
         const updateSummary = () => {
           let overwrite = 0;
-          for (const ent of entries) if (ent.cb.checked) overwrite++;
+          let visible = 0;
+          let visibleOverwrite = 0;
+          for (const ent of entries) {
+            const isVisible = ent.row.style.display !== 'none';
+            if (ent.cb.checked) overwrite++;
+            if (isVisible) {
+              visible += 1;
+              if (ent.cb.checked) visibleOverwrite += 1;
+            }
+          }
           const keep = entries.length - overwrite;
-          summary.textContent = `Overwrite: ${overwrite} • Keep: ${keep}`;
+          const visibleKeep = visible - visibleOverwrite;
+          summary.textContent =
+            `Overwrite: ${overwrite} • Keep: ${keep} • Visible overwrite: ${visibleOverwrite} • Visible keep: ${visibleKeep}`;
         };
-        updateSummary();
+
+        const applyFilter = () => {
+          const q = (filterInput.value || '').trim().toLowerCase();
+          let visible = 0;
+          for (const ent of entries) {
+            const match = !q || ent.nameNorm.includes(q);
+            ent.row.style.display = match ? '' : 'none';
+            if (match) visible += 1;
+          }
+          filterMeta.textContent = q
+            ? `Filter: ${visible}/${entries.length} visible`
+            : `All entries visible: ${entries.length}`;
+          updateSummary();
+        };
+        filterInput.oninput = applyFilter;
+        applyFilter();
 
         allToggle.onchange = () => {
-          const rows = list.querySelectorAll('input[type="checkbox"]');
-          rows.forEach((cb) => {
-            if (cb.disabled) return;
-            cb.checked = allToggle.checked;
-            cb.dispatchEvent(new Event('change'));
+          entries.forEach((ent) => {
+            if (ent.cb.disabled) return;
+            if (ent.row.style.display === 'none') return;
+            ent.cb.checked = allToggle.checked;
           });
+          updateSummary();
         };
 
         const cleanup = (answer) => {
@@ -1111,6 +1251,12 @@ _HTML = r"""<!doctype html>
 
     async function enqueueJob(job) {
       job.status = 'preflight';
+      const selectedCount = (job.items || []).length;
+      job.selectedCount = selectedCount;
+      job.queuedDupCount = 0;
+      job.existsCount = 0;
+      job.inProgressCount = 0;
+      job.duplicateInSelectionCount = 0;
       for (const item of job.items) {
         item.onExists = 'overwrite';
       }
@@ -1128,13 +1274,16 @@ _HTML = r"""<!doctype html>
         uniqueItems.push(item);
       }
       job.items = uniqueItems;
+      job.queuedDupCount = skippedDuplicates;
       job.totalBytes = job.items.reduce((a, it) => a + (it.file.size || 0), 0);
       if (skippedDuplicates > 0) {
-        showPageError(`${skippedDuplicates} file(s) skipped: target path already in queue/upload.`);
+        showPageError(
+          `Selected ${selectedCount} file(s): ${skippedDuplicates} already queued/in-progress and skipped.`
+        );
       }
       if (job.items.length === 0) {
         job.status = 'done';
-        job.error = 'Nothing new in queue (duplicates only).';
+        job.error = `Nothing new in queue (selected ${selectedCount}, duplicate targets ${skippedDuplicates}).`;
         queue.push(job);
         renderQueue();
         return;
@@ -1152,7 +1301,13 @@ _HTML = r"""<!doctype html>
 
       let conflicts = preflight.conflicts || [];
       if (conflicts.length) {
-        const choice = await showConflictDialog(conflicts);
+        job.existsCount = conflicts.filter(c => (c.reason || 'exists') === 'exists').length;
+        job.inProgressCount = conflicts.filter(c => c.reason === 'in_progress').length;
+        job.duplicateInSelectionCount = conflicts.filter(c => c.reason === 'duplicate_in_request').length;
+        const choice = await showConflictDialog(conflicts, {
+          selectedCount,
+          queuedDupCount: skippedDuplicates,
+        });
         if (!choice || choice.action === 'cancel') {
           job.status = 'canceled';
           job.error = 'Canceled (before upload)';
@@ -1178,7 +1333,8 @@ _HTML = r"""<!doctype html>
         job.totalBytes = job.items.reduce((a, it) => a + (it.file.size || 0), 0);
         if (job.items.length === 0) {
           job.status = 'done';
-          job.error = 'All files already exist (nothing to upload)';
+          const existsCount = (conflicts || []).filter(c => (c.reason || 'exists') === 'exists').length;
+          job.error = `Nothing to upload (selected ${selectedCount}, already on server ${existsCount}, skipped ${selectedCount - job.items.length}).`;
           renderQueue();
           return;
         }
@@ -1208,6 +1364,7 @@ _HTML = r"""<!doctype html>
         const xhr = new XMLHttpRequest();
         activeXhr = xhr;
         xhr.responseType = 'json';
+        xhr.timeout = UPLOAD_TIMEOUT_MS > 0 ? UPLOAD_TIMEOUT_MS : 0;
         xhr.open('POST', `/api/upload?${params.toString()}`, true);
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
@@ -1222,7 +1379,6 @@ _HTML = r"""<!doctype html>
           if (!job._lastUi || (now - job._lastUi) > 120 || e.loaded === e.total) {
             job._lastUi = now;
             setActiveUI(job);
-            renderQueue();
           }
         };
 
@@ -1235,15 +1391,69 @@ _HTML = r"""<!doctype html>
           const ok = xhr.status === 200 && resp && resp.ok;
           if (!ok) {
             const msg = (resp && resp.error) ? resp.error : (xhr.responseText || `HTTP ${xhr.status}`);
-            reject(new Error(msg));
+            const err = new Error(msg);
+            err.code = xhr.status >= 500 ? 'http_5xx' : 'http_error';
+            err.status = xhr.status;
+            reject(err);
             return;
           }
           resolve(resp);
         };
-        xhr.onerror = () => reject(new Error('Network error during upload'));
-        xhr.onabort = () => reject(new Error('Upload canceled'));
+        xhr.onerror = () => {
+          const err = new Error('Network error during upload');
+          err.code = 'network';
+          reject(err);
+        };
+        xhr.ontimeout = () => {
+          const err = new Error('Upload timeout');
+          err.code = 'timeout';
+          reject(err);
+        };
+        xhr.onabort = () => {
+          const err = new Error('Upload canceled');
+          err.code = 'aborted';
+          reject(err);
+        };
         xhr.send(item.file);
       });
+    }
+
+    function isRetriableError(err) {
+      if (!err) return false;
+      return err.code === 'network' || err.code === 'timeout' || err.code === 'http_5xx';
+    }
+
+    async function uploadFileWithRetry(job, item, fileIndex) {
+      let attempt = 0;
+      while (true) {
+        try {
+          item.lastError = '';
+          return await uploadFile(job, item, fileIndex);
+        } catch (err) {
+          if (job.status === 'canceled') throw err;
+          const canRetry = isRetriableError(err) && attempt < MAX_FILE_RETRIES;
+          if (!canRetry) throw err;
+          attempt += 1;
+          item.lastError = `${err.message || String(err)} (retry ${attempt}/${MAX_FILE_RETRIES})`;
+          renderQueue();
+          await sleep(RETRY_BASE_DELAY_MS * attempt);
+        }
+      }
+    }
+
+    function retryJob(job) {
+      if (job.status === 'uploading') return;
+      for (const item of (job.items || [])) {
+        if (item.done || item.skipped) continue;
+        item.failed = false;
+        item.lastError = '';
+      }
+      job.status = 'queued';
+      job.error = '';
+      job.durationSec = 0;
+      job.failedCount = 0;
+      renderQueue();
+      pumpQueue();
     }
 
     async function runJob(job) {
@@ -1251,10 +1461,16 @@ _HTML = r"""<!doctype html>
       job.startedAt = performance.now();
       job._lastUi = 0;
       job.completedBytes = 0;
-      job.uploadedBytes = 0;
+      for (const item of (job.items || [])) {
+        if (item.done || item.skipped) {
+          job.completedBytes += (item.file.size || 0);
+        }
+      }
+      job.uploadedBytes = job.completedBytes;
       job.speedBps = 0;
       job.currentIndex = 0;
       job.currentPath = '';
+      job.failedCount = 0;
       setActiveUI(job);
       renderQueue();
 
@@ -1262,23 +1478,29 @@ _HTML = r"""<!doctype html>
       for (let i = 0; i < job.items.length; i++) {
         if (job.status !== 'uploading') break;
         const item = job.items[i];
+        if (item.done || item.skipped) continue;
         try {
-          const res = await uploadFile(job, item, i + 1);
+          const res = await uploadFileWithRetry(job, item, i + 1);
           if (res && res.skipped) {
             item.skipped = true;
+            item.done = true;
           } else {
             item.sha256 = res.sha256 || '';
+            item.done = true;
             sessionUploadedBytes += (item.file.size || 0);
           }
+          item.failed = false;
+          item.lastError = '';
           job.completedBytes += (item.file.size || 0);
           job.uploadedBytes = job.completedBytes;
           setActiveUI(job);
           renderQueue();
         } catch (e) {
           if (job.status === 'canceled') break;
-          job.status = 'error';
-          job.error = (e && e.message) ? e.message : String(e);
-          break;
+          item.failed = true;
+          item.lastError = (e && e.message) ? e.message : String(e);
+          job.failedCount += 1;
+          renderQueue();
         }
       }
 
@@ -1286,7 +1508,15 @@ _HTML = r"""<!doctype html>
       activeXhr = null;
       job.endedAt = performance.now();
       job.durationSec = (job.endedAt - job.startedAt) / 1000;
-      if (job.status === 'uploading') job.status = 'done';
+      if (job.status === 'uploading') {
+        const remaining = (job.items || []).filter(it => !it.done && !it.skipped);
+        if (remaining.length > 0) {
+          job.status = 'error';
+          job.error = `${remaining.length} file(s) failed. Click Retry to continue remaining files.`;
+        } else {
+          job.status = 'done';
+        }
+      }
       setActiveUI(null);
       renderQueue();
     }
@@ -1467,7 +1697,7 @@ def _build_bind_endpoints(
                 if item:
                     hosts.append(item)
         if not hosts:
-            hosts = ["0.0.0.0"]
+            hosts = [DEFAULT_BIND_HOST]
         endpoints = [(h, int(port)) for h in hosts]
 
     unique: list[tuple[str, int]] = []
@@ -1488,36 +1718,68 @@ def _build_bind_endpoints(
 
 
 def run_server(
-    endpoints: list[tuple[str, int]], per_client_limit: int = 1
+    endpoints: list[tuple[str, int]],
+    per_client_limit: int = DEFAULT_PER_CLIENT_LIMIT,
+    retry_count: int = DEFAULT_RETRY_COUNT,
+    retry_delay_ms: int = DEFAULT_RETRY_DELAY_MS,
+    upload_timeout_sec: int = DEFAULT_UPLOAD_TIMEOUT_SEC,
 ) -> None:
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     STATE.set_per_ip_limit(per_client_limit)
+    _HTML_CONFIG["max_file_retries"] = max(0, int(retry_count))
+    _HTML_CONFIG["retry_delay_ms"] = max(0, int(retry_delay_ms))
+    _HTML_CONFIG["upload_timeout_ms"] = max(0, int(upload_timeout_sec)) * 1000
 
     local_ips = _get_local_ipv4_addresses()
     primary_ip = local_ips[0] if local_ips else "127.0.0.1"
+    label_w = 28
+
+    def _print_kv(label: str, value: str) -> None:
+        print(f"{label + ':':<{label_w}} {value}")
 
     print("\n" + "=" * 60)
     print("Upload server started")
     print("=" * 60)
-    print(f"Python:         {platform.python_version()}")
-    print(f"OS:             {platform.system()}")
-    print(f"Primary IP:     {primary_ip}")
+    _print_kv("Python", platform.python_version())
+    _print_kv("OS", platform.system())
+    _print_kv("Primary IP", primary_ip)
     if local_ips:
-        print(f"Local IPv4s:    {', '.join(local_ips)}")
-    print(f"Per-client limit: {max(1, int(per_client_limit))}")
+        _print_kv("Local IPv4 count", str(len(local_ips)))
+        if len(local_ips) > 3:
+            print("Local IPv4s:")
+            for ip in local_ips:
+                print(f"  - {ip}")
+        else:
+            _print_kv("Local IPv4s", ", ".join(local_ips))
+    _print_kv(
+        "Per-client concurrency",
+        f"{max(1, int(per_client_limit))} upload(s) per client IP",
+    )
+    _print_kv(
+        "Automatic retries",
+        f"{_HTML_CONFIG['max_file_retries']} (base delay {_HTML_CONFIG['retry_delay_ms']} ms)",
+    )
+    timeout_ms = int(_HTML_CONFIG["upload_timeout_ms"])
+    timeout_text = "disabled" if timeout_ms == 0 else f"{timeout_ms // 1000} s"
+    _print_kv("Per-file timeout", timeout_text)
     print("Bindings:")
     for host, port in endpoints:
-        print(f"  - {host}:{port}")
+        print(f"    - {host}:{port}")
     print("\nAccess URLs:")
+
+    def _print_access(kind: str, url: str) -> None:
+        print(f"    - {kind:<8} {url}")
+
     for host, port in endpoints:
         if host in ("", "0.0.0.0"):
-            print(f"  Local:    http://localhost:{port}")
+            _print_access("local", f"http://localhost:{port}")
             for ip in local_ips[:5]:
-                print(f"  Network:  http://{ip}:{port}")
+                _print_access("network", f"http://{ip}:{port}")
         else:
-            print(f"  Host:     http://{host}:{port}")
-    print(f"\nStorage path: {UPLOAD_ROOT}")
-    print("To stop: Ctrl+C")
+            _print_access("host", f"http://{host}:{port}")
+    print()
+    _print_kv("Storage path", str(UPLOAD_ROOT))
+    _print_kv("To stop", "Ctrl+C")
     print("=" * 60 + "\n")
 
     servers: list[ThreadingHTTPServer] = []
@@ -1555,7 +1817,10 @@ if __name__ == "__main__":
         type=str,
         action="append",
         default=[],
-        help="Host/IP to bind with --port. Repeatable or comma-separated (default: 0.0.0.0)",
+        help=(
+            "Host/IP to bind with --port. Repeatable or comma-separated "
+            f"(default: {DEFAULT_BIND_HOST})"
+        ),
     )
     parser.add_argument(
         "--listen",
@@ -1568,21 +1833,60 @@ if __name__ == "__main__":
         "-p",
         "--port",
         type=int,
-        default=8040,
-        help="TCP port to listen on (default: 8040)",
+        default=DEFAULT_PORT,
+        help=f"TCP port to listen on (default: {DEFAULT_PORT})",
     )
     parser.add_argument(
         "--per-client-limit",
         type=int,
-        default=1,
-        help="Max simultaneous uploads per client IP (default: 1)",
+        default=DEFAULT_PER_CLIENT_LIMIT,
+        help=(
+            "Max simultaneous uploads per client IP "
+            f"(default: {DEFAULT_PER_CLIENT_LIMIT})"
+        ),
+    )
+    parser.add_argument(
+        "--retry-count",
+        type=int,
+        default=DEFAULT_RETRY_COUNT,
+        help=(
+            "Automatic retries per file for transient errors "
+            f"(default: {DEFAULT_RETRY_COUNT})"
+        ),
+    )
+    parser.add_argument(
+        "--retry-delay-ms",
+        type=int,
+        default=DEFAULT_RETRY_DELAY_MS,
+        help=(
+            "Base backoff delay for automatic retries in milliseconds "
+            f"(default: {DEFAULT_RETRY_DELAY_MS})"
+        ),
+    )
+    parser.add_argument(
+        "--upload-timeout-sec",
+        type=int,
+        default=DEFAULT_UPLOAD_TIMEOUT_SEC,
+        help=(
+            "Per-file upload timeout in seconds "
+            f"(default: {DEFAULT_UPLOAD_TIMEOUT_SEC} = disabled)"
+        ),
     )
     args = parser.parse_args()
     try:
         endpoints = _build_bind_endpoints(args.host, args.port, args.listen)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.retry_count < 0:
+        parser.error("--retry-count must be >= 0")
+    if args.retry_delay_ms < 0:
+        parser.error("--retry-delay-ms must be >= 0")
+    if args.upload_timeout_sec < 0:
+        parser.error("--upload-timeout-sec must be >= 0 (0 disables timeout)")
     run_server(
         endpoints=endpoints,
         per_client_limit=max(1, args.per_client_limit),
+        retry_count=args.retry_count,
+        retry_delay_ms=args.retry_delay_ms,
+        upload_timeout_sec=args.upload_timeout_sec,
     )
