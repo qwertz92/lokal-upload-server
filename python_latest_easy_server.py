@@ -1,8 +1,39 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
-import re  # Fügen wir das re (Regular Expression) Modul hinzu
+from pathlib import Path
+import tempfile
+from urllib.parse import parse_qs, urlsplit
+
+
+BUFFER_SIZE = 8 * 1024 * 1024
+
+
+def _safe_relative_path(raw_path):
+    """Validiert einen vom Browser übermittelten relativen Dateipfad."""
+    normalized = (raw_path or '').replace('\\', '/').strip()
+    if not normalized or normalized.startswith('/'):
+        raise ValueError("Ungültiger Dateipfad")
+
+    parts = normalized.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise ValueError("Ungültiger Dateipfad")
+    if ':' in parts[0]:
+        raise ValueError("Ungültiger Dateipfad")
+
+    return Path(*parts)
+
 
 class SimpleUploadServer(BaseHTTPRequestHandler):
+    upload_directory = Path('uploads')
+
+    def _send_text(self, status, message):
+        body = message.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         """Zeigt die Upload-Seite mit den zwei Upload-Optionen an."""
         self.send_response(200)
@@ -101,14 +132,12 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     const status = document.getElementById('singleStatus');
                     
                     progress.style.display = 'block';
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    
                     try {
                         status.textContent = `Lade ${file.name} hoch...`;
-                        const response = await fetch('/', {
+                        const response = await fetch(`/upload?path=${encodeURIComponent(file.name)}`, {
                             method: 'POST',
-                            body: formData
+                            headers: {'Content-Type': 'application/octet-stream'},
+                            body: file
                         });
                         
                         if (!response.ok) {
@@ -142,15 +171,13 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     let uploadedCount = 0;
 
                     for (let file of files) {
-                        const formData = new FormData();
-                        formData.append('file', file);
-                        formData.append('path', file.webkitRelativePath);
-                        
                         try {
                             status.textContent = `Lade hoch: ${file.webkitRelativePath}`;
-                            const response = await fetch('/', {
+                            const uploadPath = file.webkitRelativePath || file.name;
+                            const response = await fetch(`/upload?path=${encodeURIComponent(uploadPath)}`, {
                                 method: 'POST',
-                                body: formData
+                                headers: {'Content-Type': 'application/octet-stream'},
+                                body: file
                             });
                             
                             if (!response.ok) {
@@ -175,83 +202,55 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         '''
         self.wfile.write(html.encode())
 
-def do_POST(self):
-    """Verarbeitet den Datei-Upload mit Streaming für große Dateien."""
-    try:
-        # Lese die Content-Length und den Content-Type
-        content_length = int(self.headers.get('Content-Length', 0))
-        content_type = self.headers.get('Content-Type', '')
-        
-        if not content_type.startswith('multipart/form-data'):
-            raise ValueError("Falscher Content-Type")
-            
-        # Hole die boundary aus dem Content-Type
-        boundary = '--' + content_type.split('=')[1]
-        
-        # Puffer-Größe: 8MB
-        BUFFER_SIZE = 8 * 1024 * 1024
-        
-        # Temporäre Datei für den Upload
-        import tempfile
-        temp_file = tempfile.NamedTemporaryFile(delete=False)
-        
-        # Status-Variablen
-        reading_file = False
-        filename = None
-        bytes_read = 0
-        
+    def do_POST(self):
+        """Speichert eine Datei als Stream, ohne sie komplett in RAM zu laden."""
+        temp_path = None
         try:
-            # Lese die Daten in Chunks
-            while bytes_read < content_length:
-                chunk = self.rfile.read(min(BUFFER_SIZE, content_length - bytes_read))
-                if not chunk:
-                    break
-                    
-                if not reading_file:
-                    # Suche nach Dateinamen im Header
-                    chunk_str = chunk.decode('utf-8', 'ignore')
-                    if 'filename="' in chunk_str:
-                        filename = chunk_str.split('filename="')[1].split('"')[0]
-                        # Finde den Start der Dateidaten
-                        file_start = chunk.find(b'\r\n\r\n') + 4
-                        if file_start > 0:
-                            reading_file = True
-                            chunk = chunk[file_start:]
-                
-                if reading_file:
+            parsed_url = urlsplit(self.path)
+            if parsed_url.path != '/upload':
+                self._send_text(404, "Nicht gefunden")
+                return
+
+            query = parse_qs(parsed_url.query)
+            relative_path = _safe_relative_path((query.get('path') or [''])[0])
+
+            content_length_header = self.headers.get('Content-Length')
+            if content_length_header is None:
+                self._send_text(411, "Content-Length fehlt")
+                return
+            content_length = int(content_length_header)
+            if content_length < 0:
+                raise ValueError("Ungültige Content-Length")
+
+            upload_root = self.upload_directory.resolve()
+            destination = (upload_root / relative_path).resolve()
+            if upload_root not in destination.parents:
+                raise ValueError("Ungültiger Dateipfad")
+
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            file_descriptor, temp_name = tempfile.mkstemp(
+                prefix='.upload-', dir=str(destination.parent)
+            )
+            temp_path = Path(temp_name)
+
+            with os.fdopen(file_descriptor, 'wb') as temp_file:
+                remaining = content_length
+                while remaining:
+                    chunk = self.rfile.read(min(BUFFER_SIZE, remaining))
+                    if not chunk:
+                        raise ConnectionError("Upload wurde vorzeitig unterbrochen")
                     temp_file.write(chunk)
-                    
-                bytes_read += len(chunk)
-            
-            temp_file.close()
-            
-            if filename:
-                # Erstelle den endgültigen Pfad
-                save_path = os.path.join('uploads', filename)
-                os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                
-                # Verschiebe die temporäre Datei an den endgültigen Ort
-                import shutil
-                shutil.move(temp_file.name, save_path)
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(f"Datei {filename} erfolgreich hochgeladen".encode())
-            else:
-                raise ValueError("Keine Datei gefunden")
-                
-        except Exception as e:
-            # Lösche die temporäre Datei im Fehlerfall
-            os.unlink(temp_file.name)
-            raise e
-            
-    except Exception as e:
-        print(f"Fehler beim Upload: {str(e)}")
-        self.send_response(500)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(str(e).encode())
+                    remaining -= len(chunk)
+
+            os.replace(temp_path, destination)
+            temp_path = None
+            self._send_text(200, f"Datei {relative_path.as_posix()} erfolgreich hochgeladen")
+        except (ValueError, OSError) as error:
+            print(f"Fehler beim Upload: {error}")
+            self._send_text(400, str(error))
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
 # def run_server(port=8040):
 #     """Startet den Server auf dem angegebenen Port."""
