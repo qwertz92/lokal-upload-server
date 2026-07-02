@@ -42,8 +42,11 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         
         html = '''
         <!DOCTYPE html>
-        <html>
+        <html lang="de">
         <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Datei-Upload</title>
             <style>
                 body { 
                     font-family: Arial, sans-serif;
@@ -88,11 +91,11 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         <body>
             <h1>Datei-Upload</h1>
             
-            <!-- Einzeldatei-Upload -->
+            <!-- Datei-Upload -->
             <div class="upload-section">
-                <h2>Einzelne Datei hochladen</h2>
-                <form id="singleFileForm" enctype="multipart/form-data" method="post">
-                    <input type="file" name="file">
+                <h2>Eine oder mehrere Dateien hochladen</h2>
+                <form id="singleFileForm">
+                    <input type="file" name="files" multiple required>
                     <br><br>
                     <input type="submit" value="Hochladen" class="button">
                 </form>
@@ -117,13 +120,13 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             </div>
 
             <script>
-                // Funktion für den Upload einer einzelnen Datei
+                // Funktion für den Upload einer oder mehrerer Dateien
                 document.getElementById('singleFileForm').onsubmit = async function(e) {
                     e.preventDefault();
                     const form = e.target;
-                    const file = form.querySelector('input[type="file"]').files[0];
-                    if (!file) {
-                        alert('Bitte wählen Sie eine Datei aus');
+                    const files = Array.from(form.querySelector('input[type="file"]').files);
+                    if (files.length === 0) {
+                        alert('Bitte wählen Sie mindestens eine Datei aus');
                         return;
                     }
 
@@ -132,25 +135,35 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     const status = document.getElementById('singleStatus');
                     
                     progress.style.display = 'block';
-                    try {
-                        status.textContent = `Lade ${file.name} hoch...`;
-                        const response = await fetch(`/upload?path=${encodeURIComponent(file.name)}`, {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/octet-stream'},
-                            body: file
-                        });
-                        
-                        if (!response.ok) {
-                            const errorText = await response.text();
-                            throw new Error(errorText);
+                    progressBar.style.width = '0%';
+                    let uploadedCount = 0;
+
+                    for (const file of files) {
+                        try {
+                            status.textContent = `Lade ${file.name} hoch (${uploadedCount + 1}/${files.length})...`;
+                            const response = await fetch(`/upload?path=${encodeURIComponent(file.name)}`, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/octet-stream'},
+                                body: file
+                            });
+
+                            if (!response.ok) {
+                                const errorText = await response.text();
+                                throw new Error(errorText);
+                            }
+
+                            uploadedCount++;
+                            progressBar.style.width = (uploadedCount / files.length * 100) + '%';
+                        } catch (error) {
+                            status.textContent = `Fehler beim Upload von ${file.name}: ${error.message}`;
+                            console.error('Upload error:', error);
+                            return;
                         }
-                        
-                        progressBar.style.width = '100%';
-                        status.textContent = `${file.name} wurde erfolgreich hochgeladen!`;
-                    } catch (error) {
-                        status.textContent = `Fehler beim Upload: ${error.message}`;
-                        console.error('Upload error:', error);
                     }
+
+                    status.textContent = files.length === 1
+                        ? `${files[0].name} wurde erfolgreich hochgeladen!`
+                        : `Alle ${uploadedCount} Dateien wurden erfolgreich hochgeladen!`;
                 };
 
                 // Funktion für den Ordner-Upload

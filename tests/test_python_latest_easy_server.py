@@ -73,6 +73,14 @@ class UploadServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertFalse((Path(self.temp_directory.name) / 'outside.txt').exists())
 
+    def test_upload_page_allows_selecting_multiple_files(self):
+        status, response = self.request('GET', '/')
+        html = response.decode('utf-8')
+
+        self.assertEqual(status, 200)
+        self.assertIn('name="files" multiple required', html)
+        self.assertIn('const files = Array.from(', html)
+
 
 if __name__ == '__main__':
     unittest.main()
