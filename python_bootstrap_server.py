@@ -4,6 +4,65 @@ import logging
 from typing import Optional
 import secrets
 
+# Bootstrap was previously pulled from a CDN for eight utility classes. That
+# made a LAN-only, dependency-free server fail to render on a machine without
+# internet. These rules reproduce the same look and ship with the file.
+_PAGE_STYLE = """
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+        font-size: 1rem;
+        line-height: 1.5;
+        color: #212529;
+        background: #fff;
+      }
+      .container { width: 100%; max-width: 1140px; margin: 0 auto; padding: 0 12px; }
+      .mb-3 { margin-bottom: 1rem; }
+      .mb-4 { margin-bottom: 1.5rem; }
+      .mt-5 { margin-top: 3rem; }
+      .form-control {
+        display: block;
+        width: 100%;
+        padding: 0.375rem 0.75rem;
+        font-size: 1rem;
+        line-height: 1.5;
+        color: #212529;
+        background-color: #fff;
+        border: 1px solid #ced4da;
+        border-radius: 0.375rem;
+      }
+      .form-control:focus {
+        border-color: #86b7fe;
+        outline: 0;
+        box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+      }
+      .btn {
+        display: inline-block;
+        padding: 0.375rem 0.75rem;
+        font-size: 1rem;
+        line-height: 1.5;
+        border-radius: 0.375rem;
+        border: 1px solid transparent;
+        cursor: pointer;
+        text-decoration: none;
+      }
+      .btn-primary { color: #fff; background-color: #0d6efd; border-color: #0d6efd; }
+      .btn-primary:hover { background-color: #0b5ed7; border-color: #0a58ca; }
+      .alert {
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border: 1px solid transparent;
+        border-radius: 0.375rem;
+      }
+      .alert-success { color: #0f5132; background-color: #d1e7dd; border-color: #badbcc; }
+      .alert-danger { color: #842029; background-color: #f8d7da; border-color: #f5c2c7; }
+      .upload-form { max-width: 500px; margin: 50px auto; padding: 20px; }
+    </style>
+"""
+
+
 class UploadServer(BaseHTTPRequestHandler):
     # Konfigurationsvariablen
     UPLOAD_DIR = "uploads"
@@ -21,15 +80,12 @@ class UploadServer(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         
-        html = '''
+        html = f'''
         <!DOCTYPE html>
         <html>
         <head>
             <title>File Upload</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-            <style>
-                .upload-form { max-width: 500px; margin: 50px auto; padding: 20px; }
-            </style>
+            {_PAGE_STYLE}
         </head>
         <body>
             <div class="container">
@@ -125,7 +181,7 @@ class UploadServer(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+            {_PAGE_STYLE}
         </head>
         <body>
             <div class="container mt-5">
