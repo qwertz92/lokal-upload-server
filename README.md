@@ -7,6 +7,9 @@ A local Python upload server for LAN usage, with queue support, folder structure
 - No external dependencies
 - Uses only Python standard library modules
 - No `pip install` required
+- Nothing is fetched at runtime either: no CDN, no web fonts, no remote assets.
+  Every page is self-contained, so the server works on an isolated LAN with no
+  internet access at all.
 
 ## Features
 
@@ -20,8 +23,14 @@ A local Python upload server for LAN usage, with queue support, folder structure
   - Selection filter toggle (`all`, `selected`, `unselected`)
   - Folder-level rules (`keep`, `overwrite`, automatic `mixed` state)
   - Collapsible file/folder views and larger/compact modal size
-- Byte-based progress, speed, and ETA
-- Overall progress for the running queue
+- Always-visible overall progress bar (sticky, stays in view no matter how long the queue gets)
+- Byte-based progress, smoothed speed, and ETA
+- Total upload time counts only time actually spent uploading, not idle gaps
+- Scrollable queue list with the running job pinned to the top
+- Reorderable queue: drag a waiting job, or use the up/down/`Upload this next` buttons
+- Multiple folders per upload: drop several at once, or pick them one after another
+- Drag and drop for files and folders, with folder structure preserved
+- Upload percentage in the browser tab title
 - Abort support for active uploads
 - Retry support for transient upload errors (network/timeout/5xx)
 - Server logs with client IP, upload start, per-file start/done, and SHA256
@@ -29,7 +38,17 @@ A local Python upload server for LAN usage, with queue support, folder structure
 
 ## Requirements
 
-- Python `>= 3.9`
+- Python `>= 3.8`, no pip and no external packages
+- Verified on 3.11, 3.12, 3.13, and 3.14 (Windows and Linux)
+- Check your interpreter before relying on it:
+
+```bash
+python 2025_12_python_upload_webserver.py --selftest
+```
+
+  This starts the server on a temporary port, fetches the page once, and exits.
+  It catches breakage that a syntax check cannot, such as a standard-library
+  module that a newer Python has removed.
 
 ## Start (Windows)
 
@@ -58,6 +77,7 @@ python ./2025_12_python_upload_webserver.py
 - `--retry-count`: automatic retries per file for transient errors (default: `2`)
 - `--retry-delay-ms`: base retry delay in ms, with incremental backoff (default: `800`)
 - `--upload-timeout-sec`: per-file upload timeout in seconds (default: `0` = disabled)
+- `--selftest`: start on a temporary port, fetch the page once, then exit
 
 Examples:
 
@@ -107,7 +127,15 @@ python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1
 ## Usage
 
 - Files panel: choose one or more files and click `Add to queue`
-- Folder panel: choose a folder and click `Add to queue`
+- Folders panel: choose a folder, then choose another one. Each pick is added to
+  the staging list, and `Add to queue` turns every staged folder into its own
+  queue entry.
+- Drag and drop: drop files and folders anywhere on the page. To upload several
+  folders at once, select them with `Ctrl` in your file manager and drag them in
+  together. Each dropped folder becomes its own queue entry.
+- Reordering the queue: waiting jobs can be dragged, moved with the arrow
+  buttons, or promoted with `Upload this next`. The running job keeps its place.
+- `Clear finished` removes all done, failed, and cancelled entries at once.
 - On conflicts: choose per file whether to overwrite or keep
 - Conflict modal:
   - `Overwrite all` applies to current search matches (scope + filter)
@@ -171,8 +199,30 @@ python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1
   - Another active/queued upload is already targeting the same destination path.
   - Wait for the other upload, cancel it, or rename the source file/folder.
 
+## Progress And Timing
+
+- The overall progress bar sits above the queue and sticks to the top of the
+  window, so it stays visible while the queue scrolls.
+- `upload time` is the time genuinely spent transferring, summed over every job
+  in the session. Idle time between uploads is not counted, so adding a job
+  hours later does not inherit those hours.
+- Speed is smoothed with an exponential moving average, and the ETA is withheld
+  for the first few seconds until the measurement is meaningful.
+- The bar holds just short of full until the server has acknowledged every file,
+  because the browser reports bytes handed to the socket, not bytes written.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+Covers path sanitisation, folder-structure uploads, conflict handling, the
+request-body rules (`Content-Length`, chunked encoding), and temp-file cleanup.
+
 ## Repository Layout
 
 - `2025_12_python_upload_webserver.py`: current main server
+- `tests/`: unit tests for the main server and the easy server
 - `uploads/`: upload destination folder
-- `python_bootstrap_server.py`, `python_latest_easy_server.py`, `python3-8_server.py`: older variants
+- `python_bootstrap_server.py`, `python_latest_easy_server.py`: older variants
