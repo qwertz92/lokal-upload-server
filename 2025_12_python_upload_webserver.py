@@ -834,6 +834,15 @@ _HTML_TEMPLATE = r"""<!doctype html>
       display: grid;
       gap: 10px;
       min-width: 0;
+      align-content: start;
+      /* Long queues scroll inside the card instead of stretching the page,
+         so the sticky status bar stays reachable. */
+      max-height: min(52vh, 520px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      /* Reserve the scrollbar gutter permanently: rows keep their width
+         when the list grows past the max-height (no layout shift). */
+      scrollbar-gutter: stable;
     }
     .qitem {
       border: 1px solid var(--border);
@@ -847,14 +856,139 @@ _HTML_TEMPLATE = r"""<!doctype html>
       min-width: 0;
       width: 100%;
     }
+    .qitem.active {
+      border-color: rgba(245,158,11,.55);
+      /* The running job stays pinned at the top of the scrolled list, so it
+         never has to be chased with an auto-scroll. */
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #131d33;
+    }
+    /* Keyboard focus must not land under the sticky status bar. */
+    .qitem { scroll-margin-top: 110px; }
+    /* Drag state only swaps colours, never sizes, so rows never jump. */
+    .qitem.dragging { opacity: .55; }
+    .qitem.dropTarget { border-color: rgba(34,197,94,.85); background: rgba(34,197,94,.10); }
     .qleft { min-width: 0; overflow: hidden; }
     .qtitle { display: block; max-width: 100%; font-weight: 750; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .qsub { display: block; max-width: 100%; color: var(--muted); font-size: 13px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .qactions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex: 0 0 auto; }
+    .qbar { height: 4px; margin-top: 6px; border-radius: 999px; }
+    .qgrip {
+      color: var(--muted);
+      cursor: grab;
+      user-select: none;
+      font-size: 15px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .qgrip:active { cursor: grabbing; }
+    .btn.icon {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      line-height: 1;
+    }
     @media (max-width: 760px) {
       .qitem { grid-template-columns: 1fr; }
-      .qactions { justify-content: flex-start; }
+      .qactions { justify-content: flex-start; flex-wrap: wrap; }
     }
+
+    /* Always-visible overall progress. Height is constant in every state
+       (idle and uploading render the same three rows) so nothing shifts. */
+    .statusbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      margin-top: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(11,18,32,.94);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 12px 28px rgba(0,0,0,.35);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+    }
+    .statusMain { min-width: 0; }
+    .statusHead {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+    .statusTitle {
+      font-weight: 750;
+      font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .statusPct { font-size: 14px; font-weight: 750; flex: 0 0 auto; }
+    .statusbar .progress { margin-top: 8px; height: 14px; }
+    .statusStats {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 8px;
+      min-height: 18px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .statusActions { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+    @media (max-width: 620px) {
+      .statusbar { grid-template-columns: 1fr; }
+      .statusActions { justify-content: flex-end; }
+    }
+
+    .dropzone {
+      border: 1px dashed rgba(255,255,255,.22);
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 14px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      background: rgba(255,255,255,.02);
+      transition: background .12s linear, border-color .12s linear;
+    }
+    .dropzone.over {
+      border-color: rgba(34,197,94,.85);
+      background: rgba(34,197,94,.10);
+      color: var(--text);
+    }
+    .staged {
+      list-style: none;
+      margin: 8px 0 0;
+      padding: 0;
+      display: grid;
+      gap: 6px;
+      max-height: 150px;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+    }
+    .stagedRow {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      font-size: 13px;
+      color: var(--muted);
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px 8px;
+    }
+    .stagedName { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -882,7 +1016,26 @@ _HTML_TEMPLATE = r"""<!doctype html>
       background: linear-gradient(90deg, rgba(34,197,94,.95), rgba(45,212,191,.95));
       transition: width .12s linear;
     }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    /* Fixed-width digits keep counters from nudging the text beside them. */
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .bar { transition: none; }
+      .dropzone { transition: none; }
+    }
 
     .modal {
       position: fixed;
@@ -1088,39 +1241,55 @@ _HTML_TEMPLATE = r"""<!doctype html>
       </div>
 
       <div class="card">
-        <h2>Folder (keep structure)</h2>
+        <h2>Folders (keep structure)</h2>
         <form id="folderForm">
           <input type="file" id="folderInput" webkitdirectory directory multiple />
           <div class="row">
             <button class="btn" type="submit">Add to queue</button>
+            <button class="btn secondary" id="folderClearBtn" type="button">Clear</button>
           </div>
           <div class="meta" id="folderFileInfo"></div>
+          <ul class="staged" id="folderStaged"></ul>
           <div class="meta" id="folderWarn"></div>
         </form>
       </div>
     </div>
 
+    <div class="dropzone" id="dropZone">
+      Drop files and folders here. To upload several folders at once, select them
+      with <b>Ctrl</b> in your file manager and drag them in together.
+    </div>
+
+    <div class="statusbar" id="statusBar">
+      <div class="statusMain">
+        <div class="statusHead">
+          <span class="statusTitle" id="statusTitle">Idle</span>
+          <span class="statusPct mono" id="statusPct">0%</span>
+        </div>
+        <div class="progress" id="overallProgress" role="progressbar"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+             aria-label="Overall upload progress" aria-describedby="overallStats">
+          <div class="bar" id="overallBar"></div>
+        </div>
+        <div class="statusStats mono" id="overallStats">Nothing queued.</div>
+      </div>
+      <div class="statusActions">
+        <button class="btn danger" id="abortBtn" type="button" disabled>Abort</button>
+      </div>
+    </div>
+    <!-- A progressbar role does not announce its own updates, so milestones
+         are pushed through this separate polite region. -->
+    <p class="visually-hidden" id="progressAnnounce" role="status"
+       aria-live="polite" aria-atomic="true"></p>
+
     <div class="card" style="margin-top:14px;">
-      <h2>Queue</h2>
+      <div class="row" style="margin-top:0; justify-content:space-between;">
+        <h2 style="margin:0;">Queue</h2>
+        <button class="btn secondary small" id="clearDoneBtn" type="button">Clear finished</button>
+      </div>
       <div class="hint" id="queueEmpty">No uploads yet.</div>
       <div class="meta error" id="pageError" style="display:none;"></div>
       <ul class="queue" id="queueList"></ul>
-    </div>
-
-    <div class="card" style="margin-top:14px;">
-      <h2>Active Upload</h2>
-      <div class="hint" id="activeHint">No active upload. Session uploaded: <span id="sessionTotal">0 B</span>.</div>
-      <div id="activeBox" style="display:none;">
-        <div class="qtitle" id="activeTitle"></div>
-        <div class="qsub mono" id="activeSub"></div>
-        <div class="progress"><div class="bar" id="activeBar"></div></div>
-        <div class="qsub mono" id="activeStats" style="margin-top:8px;"></div>
-        <div class="progress" style="margin-top:12px;"><div class="bar" id="overallBar"></div></div>
-        <div class="qsub mono" id="overallStats" style="margin-top:8px;"></div>
-        <div class="row" style="justify-content:flex-end;">
-          <button class="btn danger" id="abortBtn" type="button" disabled>Abort</button>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -1177,11 +1346,93 @@ _HTML_TEMPLATE = r"""<!doctype html>
     const queue = [];
     let activeJob = null;
     let activeXhr = null;
-    let sessionUploadedBytes = 0;
     const MAX_FILE_RETRIES = __MAX_FILE_RETRIES__;
     const RETRY_BASE_DELAY_MS = __RETRY_BASE_DELAY_MS__;
     const UPLOAD_TIMEOUT_MS = __UPLOAD_TIMEOUT_MS__;
+    const CASE_INSENSITIVE_FS = __CASE_INSENSITIVE_FS__;
     const actionLocks = new Set();
+    // Id of the queue row currently being dragged, or null.
+    let dragJobId = null;
+
+    // Status bar refreshes on a clock, not on network events. Upload progress
+    // events arrive in bursts (and stop completely between files), so deriving
+    // the visible timer from them made it freeze and then jump many seconds.
+    const TICK_MS = 250;
+    // The bar moves every tick, the numbers only once a second.
+    const TEXT_REFRESH_MS = 1000;
+    // Throughput is smoothed with a time-constant EMA instead of a
+    // since-start average, which never recovers from an early slow phase.
+    const RATE_TAU_SEC = 5;
+    const RATE_MIN_SAMPLE_SEC = 0.4;
+    const RATE_WARMUP_MS = 3000;
+    // Firefox's download manager weights a falling estimate more than a rising
+    // one, so a short hiccup does not make "time left" jump upwards.
+    const ETA_FALL_ALPHA = 0.3;
+    const ETA_RISE_ALPHA = 0.1;
+    const BASE_TITLE = document.title;
+
+    // Time actually spent uploading, summed over every finished run. Idle
+    // gaps between uploads are not part of it, so a job added hours later
+    // does not inherit those hours.
+    const session = { activeMs: 0, uploadedBytes: 0 };
+
+    const rateMeter = { primed: false, startedAt: 0, lastAt: 0, lastBytes: 0, bps: 0 };
+    let shownEtaSec = null;
+
+    function smoothEta(rawSec) {
+      if (shownEtaSec === null) {
+        shownEtaSec = rawSec;
+        return rawSec;
+      }
+      const diff = rawSec - shownEtaSec;
+      shownEtaSec += diff * (diff < 0 ? ETA_FALL_ALPHA : ETA_RISE_ALPHA);
+      return shownEtaSec;
+    }
+
+    function resetRateMeter() {
+      shownEtaSec = null;
+      rateMeter.primed = false;
+      rateMeter.startedAt = performance.now();
+      rateMeter.lastAt = 0;
+      rateMeter.lastBytes = 0;
+      rateMeter.bps = 0;
+    }
+
+    function sampleRateMeter(bytes, nowMs) {
+      if (!rateMeter.primed) {
+        rateMeter.primed = true;
+        rateMeter.lastAt = nowMs;
+        rateMeter.lastBytes = bytes;
+        return;
+      }
+      const dt = (nowMs - rateMeter.lastAt) / 1000;
+      if (dt < RATE_MIN_SAMPLE_SEC) return;
+      const delta = bytes - rateMeter.lastBytes;
+      rateMeter.lastAt = nowMs;
+      rateMeter.lastBytes = bytes;
+      if (delta < 0) return;
+      const instant = delta / dt;
+      // dt-aware alpha keeps the smoothing identical whether samples arrive
+      // every 250 ms or every 3 s.
+      const alpha = 1 - Math.exp(-dt / RATE_TAU_SEC);
+      rateMeter.bps = rateMeter.bps > 0
+        ? rateMeter.bps + alpha * (instant - rateMeter.bps)
+        : instant;
+    }
+
+    // Total time the queue has really been uploading, including the run in
+    // progress right now.
+    function totalActiveMs() {
+      let ms = session.activeMs;
+      if (activeJob && activeJob.startedAt) {
+        ms += Math.max(0, performance.now() - activeJob.startedAt);
+      }
+      return ms;
+    }
+
+    function setText(el, value) {
+      if (el && el.textContent !== value) el.textContent = value;
+    }
 
     function formatBytes(bytes) {
       const n = Number(bytes || 0);
@@ -1203,6 +1454,21 @@ _HTML_TEMPLATE = r"""<!doctype html>
       const c = (typeof window !== 'undefined') ? window.crypto : null;
       if (c && c.randomUUID) return c.randomUUID();
       return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function makeJob(label, kind, items) {
+      return {
+        id: newId().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 72),
+        label,
+        kind,
+        items,
+        totalBytes: items.reduce((a, it) => a + (it.file.size || 0), 0),
+        uploadedBytes: 0,
+        completedBytes: 0,
+        status: 'new',
+        error: '',
+        onExists: 'skip',
+      };
     }
 
     function showPageError(message) {
@@ -1245,12 +1511,14 @@ _HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function normPath(p) {
-      return (p || '')
+      const cleaned = (p || '')
         .replace(/\\/g, '/')
         .replace(/^\/+/, '')
         .replace(/\/+/g, '/')
-        .trim()
-        .toLowerCase();
+        .trim();
+      // Folding case on a case-sensitive server would silently drop real
+      // files: Makefile and makefile are two different targets on Linux.
+      return CASE_INSENSITIVE_FS ? cleaned.toLowerCase() : cleaned;
     }
 
     function getBusyTargetPaths() {
@@ -1275,60 +1543,196 @@ _HTML_TEMPLATE = r"""<!doctype html>
       return '<span class="badge">queued</span>';
     }
 
+    // Rows may only be reordered while they are still waiting. Everything
+    // else (running, finished, failed) keeps its place.
+    function queuedPositions() {
+      const out = [];
+      for (let i = 0; i < queue.length; i++) {
+        if (queue[i].status === 'queued') out.push(i);
+      }
+      return out;
+    }
+
+    function moveJobTo(job, targetIndex) {
+      const from = queue.indexOf(job);
+      if (from < 0 || from === targetIndex) return false;
+      queue.splice(from, 1);
+      queue.splice(targetIndex, 0, job);
+      return true;
+    }
+
+    // pumpQueue() always takes the first row with status 'queued', so moving a
+    // row to the front of the waiting block is what actually promotes it.
+    function moveJobToFront(job) {
+      const positions = queuedPositions();
+      if (!positions.length) return;
+      if (moveJobTo(job, positions[0])) renderQueue();
+    }
+
+    function moveJobByStep(job, step) {
+      const positions = queuedPositions();
+      const at = positions.indexOf(queue.indexOf(job));
+      if (at < 0) return;
+      const neighbour = positions[at + step];
+      if (neighbour === undefined) return;
+      if (moveJobTo(job, neighbour)) renderQueue();
+    }
+
+    function jobSubText(job) {
+      const infoBits = [];
+      if (Number.isFinite(job.selectedCount) && job.selectedCount > 0) {
+        infoBits.push(`selected ${job.selectedCount}`);
+      }
+      if (Number.isFinite(job.existsCount) && job.existsCount > 0) {
+        infoBits.push(`already on server ${job.existsCount}`);
+      }
+      if (Number.isFinite(job.inProgressCount) && job.inProgressCount > 0) {
+        infoBits.push(`currently uploading ${job.inProgressCount}`);
+      }
+      if (Number.isFinite(job.queuedDupCount) && job.queuedDupCount > 0) {
+        infoBits.push(`already in queue ${job.queuedDupCount}`);
+      }
+      if (Number.isFinite(job.duplicateInSelectionCount) && job.duplicateInSelectionCount > 0) {
+        infoBits.push(`duplicate in selection ${job.duplicateInSelectionCount}`);
+      }
+      const infoPrefix = infoBits.length ? `${infoBits.join(' • ')} • ` : '';
+      const pct = job.totalBytes > 0 ? Math.floor((job.uploadedBytes / job.totalBytes) * 100) : 0;
+      let extra = '';
+      if (job.status === 'uploading') {
+        extra = ` • ${pct}%`;
+        if (job.currentPath) {
+          extra += ` • file ${job.currentIndex || 0}/${job.items.length}: ${job.currentPath}`;
+        }
+      }
+      if (job.status === 'preflight') extra = ' • checking...';
+      if (job.status === 'error') extra = ` • ${job.error || 'Error'}`;
+      if (job.status === 'canceled') extra = ` • ${job.error || 'Canceled'}`;
+      if (job.status === 'done' && job.error) extra = ` • ${job.error}`;
+      if (job.failedCount) extra += ` • failed ${job.failedCount}`;
+      const dur = job.durationSec ? ` • ${formatDuration(job.durationSec)}` : '';
+      return `${infoPrefix}${job.items.length} file(s), ${formatBytes(job.totalBytes)}${extra}${dur}`;
+    }
+
+    function iconButton(label, title, onClick) {
+      const btn = document.createElement('button');
+      btn.className = 'btn secondary icon';
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.title = title;
+      btn.setAttribute('aria-label', title);
+      btn.onclick = onClick;
+      return btn;
+    }
+
     function renderQueue() {
+      // A full rebuild mid-drag would drop the element being dragged.
+      if (dragJobId) return;
       const list = $('queueList');
+      // Emptying the list resets scrollTop, which would yank the view back to
+      // the top on every rebuild once the queue is long enough to scroll.
+      const keepScroll = list.scrollTop;
       list.innerHTML = '';
       $('queueEmpty').style.display = queue.length ? 'none' : 'block';
+      const positions = queuedPositions();
 
       for (const job of queue) {
         const li = document.createElement('li');
         li.className = 'qitem';
+        if (job.status === 'uploading') li.classList.add('active');
+        job._el = li;
 
         const left = document.createElement('div');
         left.className = 'qleft';
 
         const title = document.createElement('div');
         title.className = 'qtitle';
-        title.textContent = job.label;
+        if (job.status === 'queued' && positions.length > 1) {
+          const grip = document.createElement('span');
+          grip.className = 'qgrip';
+          grip.textContent = '⠿ ';
+          grip.title = 'Drag to reorder';
+          title.appendChild(grip);
+        }
+        title.appendChild(document.createTextNode(job.label));
 
         const sub = document.createElement('div');
         sub.className = 'qsub mono';
-        const pct = job.totalBytes > 0 ? Math.floor((job.uploadedBytes / job.totalBytes) * 100) : 0;
-        const infoBits = [];
-        if (Number.isFinite(job.selectedCount) && job.selectedCount > 0) {
-          infoBits.push(`selected ${job.selectedCount}`);
-        }
-        if (Number.isFinite(job.existsCount) && job.existsCount > 0) {
-          infoBits.push(`already on server ${job.existsCount}`);
-        }
-        if (Number.isFinite(job.inProgressCount) && job.inProgressCount > 0) {
-          infoBits.push(`currently uploading ${job.inProgressCount}`);
-        }
-        if (Number.isFinite(job.queuedDupCount) && job.queuedDupCount > 0) {
-          infoBits.push(`already in queue ${job.queuedDupCount}`);
-        }
-        if (Number.isFinite(job.duplicateInSelectionCount) && job.duplicateInSelectionCount > 0) {
-          infoBits.push(`duplicate in selection ${job.duplicateInSelectionCount}`);
-        }
-        const infoPrefix = infoBits.length ? `${infoBits.join(' • ')} • ` : '';
-        let extra = '';
-        if (job.status === 'uploading') extra = ` • ${pct}%`;
-        if (job.status === 'preflight') extra = ' • checking...';
-        if (job.status === 'error') extra = ` • ${job.error || 'Error'}`;
-        if (job.status === 'canceled') extra = ` • ${job.error || 'Canceled'}`;
-        if (job.status === 'done' && job.error) extra = ` • ${job.error}`;
-        if (job.failedCount) extra += ` • failed ${job.failedCount}`;
-        const dur = job.durationSec ? ` • ${formatDuration(job.durationSec)}` : '';
-        sub.textContent = `${infoPrefix}${job.items.length} file(s), ${formatBytes(job.totalBytes)}${extra}${dur}`;
+        sub.textContent = jobSubText(job);
+        job._sub = sub;
 
         left.appendChild(title);
         left.appendChild(sub);
+
+        if (job.status === 'uploading') {
+          const track = document.createElement('div');
+          track.className = 'progress qbar';
+          const bar = document.createElement('div');
+          bar.className = 'bar';
+          bar.style.width = `${jobPercent(job)}%`;
+          track.appendChild(bar);
+          left.appendChild(track);
+          job._bar = bar;
+        } else {
+          job._bar = null;
+        }
 
         const actions = document.createElement('div');
         actions.className = 'qactions';
         actions.innerHTML = statusBadge(job);
 
         if (job.status === 'queued') {
+          if (positions.length > 1) {
+            const at = positions.indexOf(queue.indexOf(job));
+            const top = iconButton('⤒', 'Upload this next', () =>
+              withActionLock(`top:${job.id}`, () => moveJobToFront(job)));
+            top.disabled = at <= 0;
+            const up = iconButton('↑', 'Move up', () =>
+              withActionLock(`up:${job.id}`, () => moveJobByStep(job, -1)));
+            up.disabled = at <= 0;
+            const down = iconButton('↓', 'Move down', () =>
+              withActionLock(`down:${job.id}`, () => moveJobByStep(job, 1)));
+            down.disabled = at < 0 || at >= positions.length - 1;
+            actions.appendChild(top);
+            actions.appendChild(up);
+            actions.appendChild(down);
+
+            li.draggable = true;
+            li.addEventListener('dragstart', (ev) => {
+              dragJobId = job.id;
+              li.classList.add('dragging');
+              if (ev.dataTransfer) {
+                ev.dataTransfer.effectAllowed = 'move';
+                // Firefox only starts a drag when some data is set.
+                ev.dataTransfer.setData('text/plain', job.id);
+              }
+            });
+            li.addEventListener('dragend', () => {
+              dragJobId = null;
+              li.classList.remove('dragging');
+              renderQueue();
+            });
+            li.addEventListener('dragover', (ev) => {
+              if (!dragJobId || dragJobId === job.id) return;
+              const dragged = queue.find(j => j.id === dragJobId);
+              if (!dragged || dragged.status !== 'queued') return;
+              ev.preventDefault();
+              if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+              li.classList.add('dropTarget');
+            });
+            li.addEventListener('dragleave', () => li.classList.remove('dropTarget'));
+            li.addEventListener('drop', (ev) => {
+              ev.preventDefault();
+              li.classList.remove('dropTarget');
+              const dragged = queue.find(j => j.id === dragJobId);
+              dragJobId = null;
+              if (!dragged || dragged === job || dragged.status !== 'queued') return;
+              const target = queue.indexOf(job);
+              if (target < 0) return;
+              moveJobTo(dragged, target);
+              renderQueue();
+            });
+          }
+
           const btn = document.createElement('button');
           btn.className = 'btn danger';
           btn.type = 'button';
@@ -1376,43 +1780,152 @@ _HTML_TEMPLATE = r"""<!doctype html>
         li.appendChild(actions);
         list.appendChild(li);
       }
+      list.scrollTop = keepScroll;
+      // The row elements the status bar patches were just replaced, so the
+      // summary is refreshed from the new ones straight away.
+      renderStatus(true);
     }
 
-    function setActiveUI(job) {
-      if (!job) {
-        $('activeHint').style.display = 'block';
-        $('activeBox').style.display = 'none';
-        $('abortBtn').disabled = true;
-        if ($('sessionTotal')) {
-          $('sessionTotal').textContent = formatBytes(sessionUploadedBytes);
+    function jobPercent(job) {
+      if (!job || !(job.totalBytes > 0)) return 0;
+      return Math.min(100, (job.uploadedBytes / job.totalBytes) * 100);
+    }
+
+    function getOverallTotals() {
+      let totalBytes = 0;
+      let uploadedBytes = 0;
+      let totalFiles = 0;
+      let doneFiles = 0;
+      let pendingJobs = 0;
+      for (const job of queue) {
+        const items = job.items || [];
+        if (job.status === 'error' || job.status === 'canceled') {
+          // Nothing more will be sent for these, so count only what really
+          // went over the wire. Otherwise the bar could never reach 100%.
+          const sent = job.uploadedBytes || 0;
+          totalBytes += sent;
+          uploadedBytes += sent;
+          const finished = items.filter(it => it.done || it.skipped).length;
+          totalFiles += finished;
+          doneFiles += finished;
+          continue;
         }
-        return;
+        totalBytes += job.totalBytes || 0;
+        uploadedBytes += job.uploadedBytes || 0;
+        totalFiles += items.length;
+        doneFiles += items.filter(it => it.done || it.skipped).length;
+        if (job.status === 'queued' || job.status === 'preflight') pendingJobs += 1;
       }
-      $('activeHint').style.display = 'none';
-      $('activeBox').style.display = 'block';
-      $('abortBtn').disabled = false;
-      $('activeTitle').textContent = job.label;
-
-      const pct = job.totalBytes > 0 ? Math.min(100, (job.uploadedBytes / job.totalBytes) * 100) : 0;
-      $('activeBar').style.width = `${pct}%`;
-      $('activeSub').textContent = `file ${job.currentIndex || 0}/${job.items.length}: ${job.currentPath || ''}`;
-      const elapsed = (performance.now() - job.startedAt) / 1000;
-      const remaining = job.speedBps > 0 ? Math.max(0, (job.totalBytes - job.uploadedBytes) / job.speedBps) : 0;
-      $('activeStats').textContent =
-        `${formatBytes(job.uploadedBytes)} / ${formatBytes(job.totalBytes)} • ${formatSpeed(job.speedBps || 0)} • ` +
-        `elapsed ${formatDuration(elapsed)} • eta ${remaining ? formatDuration(remaining) : '--'}`;
-
-      const totals = getOverallTotals();
-      const opct = totals.totalBytes > 0 ? Math.min(100, (totals.uploadedBytes / totals.totalBytes) * 100) : 0;
-      $('overallBar').style.width = `${opct}%`;
-      const oElapsed = totals.startedAt ? (performance.now() - totals.startedAt) / 1000 : 0;
-      const oRemaining = totals.speedBps > 0 ? Math.max(0, (totals.totalBytes - totals.uploadedBytes) / totals.speedBps) : 0;
-      $('overallStats').textContent =
-        `Overall: ${formatBytes(totals.uploadedBytes)} / ${formatBytes(totals.totalBytes)} • ${formatSpeed(totals.speedBps)} • ` +
-        `elapsed ${formatDuration(oElapsed)} • eta ${oRemaining ? formatDuration(oRemaining) : '--'}`;
+      return { totalBytes, uploadedBytes, totalFiles, doneFiles, pendingJobs };
     }
+
+    let lastTextAt = 0;
+    let lastAnnouncedPct = -1;
+
+    function renderStatus(force) {
+      const totals = getOverallTotals();
+      const rawPct = totals.totalBytes > 0
+        ? Math.min(100, (totals.uploadedBytes / totals.totalBytes) * 100)
+        : 0;
+      // The browser counts bytes handed to the socket, so the bar can hit 100%
+      // while the server is still writing the last file. Holding just short of
+      // full until every file is acknowledged avoids a bar that looks finished
+      // for minutes.
+      const pct = totals.doneFiles < totals.totalFiles ? Math.min(rawPct, 99) : rawPct;
+      const pctWhole = Math.floor(pct);
+
+      // The bar follows every tick; the numbers below it do not, so they stay
+      // readable instead of flickering four times a second.
+      $('overallBar').style.width = `${pct}%`;
+      const track = $('overallProgress');
+      if (track) track.setAttribute('aria-valuenow', String(pctWhole));
+      if (activeJob && activeJob._bar) {
+        activeJob._bar.style.width = `${jobPercent(activeJob)}%`;
+      }
+
+      const now = performance.now();
+      // Sampled here rather than in the ticker: a backgrounded tab has its
+      // timers throttled, but per-file renders keep coming, so the meter
+      // still gets fed. The interval guard inside it ignores the extras.
+      if (activeJob) sampleRateMeter(activeJob.uploadedBytes || 0, now);
+
+      if (!force && now - lastTextAt < TEXT_REFRESH_MS) return;
+      lastTextAt = now;
+
+      setText($('statusPct'), `${pctWhole}%`);
+      const elapsedText = formatDuration(totalActiveMs() / 1000);
+
+      if (activeJob) {
+        setText($('statusTitle'), activeJob.label);
+        const remainingBytes = Math.max(0, totals.totalBytes - totals.uploadedBytes);
+        // An estimate from the first fraction of a second is noise, so it is
+        // withheld until the meter has seen a usable stretch of transfer.
+        const warm = rateMeter.bps > 0 && (now - rateMeter.startedAt) >= RATE_WARMUP_MS;
+        const eta = warm ? smoothEta(remainingBytes / rateMeter.bps) : 0;
+        const bits = [
+          `${formatBytes(totals.uploadedBytes)} / ${formatBytes(totals.totalBytes)}`,
+          `${totals.doneFiles}/${totals.totalFiles} files`,
+          formatSpeed(rateMeter.bps),
+          `upload time ${elapsedText}`,
+          `eta ${eta > 0 ? formatDuration(eta) : '--'}`,
+        ];
+        if (totals.pendingJobs > 0) bits.push(`${totals.pendingJobs} waiting`);
+        setText($('overallStats'), bits.join(' • '));
+        if (track) {
+          track.setAttribute('aria-valuetext',
+            `${pctWhole} percent, ${totals.doneFiles} of ${totals.totalFiles} files`);
+        }
+        setTitleProgress(`${pctWhole}%`);
+        announceProgress(pctWhole, totals);
+      } else {
+        const waiting = totals.pendingJobs;
+        setText($('statusTitle'), waiting > 0 ? `${waiting} job(s) waiting` : 'Idle');
+        setText($('overallStats'),
+          `uploaded ${formatBytes(session.uploadedBytes)} • total upload time ${elapsedText}`);
+        if (track) track.setAttribute('aria-valuetext', `${pctWhole} percent`);
+        setTitleProgress(null);
+        lastAnnouncedPct = -1;
+      }
+
+      if (activeJob && activeJob._sub) {
+        setText(activeJob._sub, jobSubText(activeJob));
+      }
+    }
+
+    // Announce in 10% steps only; per-percent updates would talk over the user.
+    function announceProgress(pctWhole, totals) {
+      const step = Math.floor(pctWhole / 10) * 10;
+      if (step === lastAnnouncedPct) return;
+      lastAnnouncedPct = step;
+      setText($('progressAnnounce'),
+        `Upload ${step} percent, ${totals.doneFiles} of ${totals.totalFiles} files done.`);
+    }
+
+    function setTitleProgress(pctText) {
+      document.title = pctText ? `${pctText} • ${BASE_TITLE}` : BASE_TITLE;
+    }
+
+    let tickTimer = null;
+    function startTicker() {
+      if (tickTimer !== null) return;
+      tickTimer = setInterval(renderStatus, TICK_MS);
+    }
+
+    function stopTicker() {
+      if (tickTimer === null) return;
+      clearInterval(tickTimer);
+      tickTimer = null;
+    }
+
+    let conflictChain = Promise.resolve();
 
     function showConflictDialog(conflicts, summaryInfo = null) {
+      const run = conflictChain.then(() => openConflictDialog(conflicts, summaryInfo));
+      conflictChain = run.catch(() => {});
+      return run;
+    }
+
+    function openConflictDialog(conflicts, summaryInfo = null) {
       return new Promise((resolve) => {
         const modal = $('conflictModal');
         const modalCard = modal.querySelector('.modalCard');
@@ -1713,7 +2226,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
         };
 
         const syncAllToggleState = () => {
-          const targets = entries.filter((ent) => !ent.cb.disabled && !!ent._searchMatch);
+          // Rows hidden by the selection filter are deliberately excluded:
+          // one click on "Overwrite all" must never flip rows off screen.
+          const targets = entries.filter((ent) => !ent.cb.disabled && !!ent._visibleMatch);
           const selectedAny = entries.some((ent) => !ent.cb.disabled && !!ent.cb.checked);
           if (targets.length === 0) {
             allToggle.checked = false;
@@ -1761,7 +2276,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
               else searchMatch = fileMatch || folderMatched;
             }
             const visibleMatch = searchMatch && selectionMatch;
-            ent._searchMatch = searchMatch;
+            ent._visibleMatch = visibleMatch;
             ent.row.style.display = visibleMatch ? '' : 'none';
             if (visibleMatch) {
               visible += 1;
@@ -1797,7 +2312,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         allToggle.onchange = () => {
           entries.forEach((ent) => {
             if (ent.cb.disabled) return;
-            if (!ent._searchMatch) return;
+            if (!ent._visibleMatch) return;
             ent.cb.checked = allToggle.checked;
             refreshEntryVisual(ent);
           });
@@ -1968,36 +2483,38 @@ _HTML_TEMPLATE = r"""<!doctype html>
         xhr.open('POST', `/api/upload?${params.toString()}`, true);
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
+        // Progress events only carry data; the ticker owns every redraw.
         xhr.upload.onprogress = (e) => {
           if (!e.lengthComputable) return;
           job.currentIndex = fileIndex;
           job.currentPath = item.path;
-          const elapsed = (performance.now() - job.startedAt) / 1000;
           job.uploadedBytes = Math.min(job.totalBytes, job.completedBytes + e.loaded);
-          job.speedBps = elapsed > 0 ? (job.uploadedBytes / elapsed) : 0;
-          const now = performance.now();
-          if (!job._lastUi || (now - job._lastUi) > 120 || e.loaded === e.total) {
-            job._lastUi = now;
-            setActiveUI(job);
-          }
         };
 
         xhr.onload = () => {
-          const resp = xhr.response || null;
-          if (xhr.status === 409 && resp && (resp.error === 'exists' || resp.error === 'in_progress')) {
-            resolve({ skipped: true, rel_path: resp.rel_path || item.path });
-            return;
+          // Anything thrown in here would leave the promise unsettled and the
+          // whole queue stuck forever, so the body is wrapped.
+          try {
+            const resp = xhr.response || null;
+            if (xhr.status === 409 && resp && (resp.error === 'exists' || resp.error === 'in_progress')) {
+              resolve({ skipped: true, rel_path: resp.rel_path || item.path });
+              return;
+            }
+            const ok = xhr.status === 200 && resp && resp.ok;
+            if (!ok) {
+              // responseText must not be touched while responseType is 'json':
+              // per spec the getter throws InvalidStateError.
+              const msg = (resp && resp.error) ? resp.error : `HTTP ${xhr.status}`;
+              const err = new Error(msg);
+              err.code = xhr.status >= 500 ? 'http_5xx' : 'http_error';
+              err.status = xhr.status;
+              reject(err);
+              return;
+            }
+            resolve(resp);
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
           }
-          const ok = xhr.status === 200 && resp && resp.ok;
-          if (!ok) {
-            const msg = (resp && resp.error) ? resp.error : (xhr.responseText || `HTTP ${xhr.status}`);
-            const err = new Error(msg);
-            err.code = xhr.status >= 500 ? 'http_5xx' : 'http_error';
-            err.status = xhr.status;
-            reject(err);
-            return;
-          }
-          resolve(resp);
         };
         xhr.onerror = () => {
           const err = new Error('Network error during upload');
@@ -2020,7 +2537,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
     function isRetriableError(err) {
       if (!err) return false;
-      return err.code === 'network' || err.code === 'timeout' || err.code === 'http_5xx';
+      // 429 is the server saying "another upload from this IP is running" —
+      // exactly the transient case worth waiting out. Anything else in the 4xx
+      // range would fail identically on every attempt.
+      return err.code === 'network' || err.code === 'timeout'
+        || err.code === 'http_5xx' || err.status === 429;
     }
 
     async function uploadFileWithRetry(job, item, fileIndex) {
@@ -2037,6 +2558,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
           item.lastError = `${err.message || String(err)} (retry ${attempt}/${MAX_FILE_RETRIES})`;
           renderQueue();
           await sleep(RETRY_BASE_DELAY_MS * attempt);
+          // Abort during the backoff cannot cancel an XHR that already
+          // finished, so without this check the retry would start a fresh
+          // upload after the user cancelled.
+          if (job.status === 'canceled') throw err;
         }
       }
     }
@@ -2059,7 +2584,6 @@ _HTML_TEMPLATE = r"""<!doctype html>
     async function runJob(job) {
       job.status = 'uploading';
       job.startedAt = performance.now();
-      job._lastUi = 0;
       job.completedBytes = 0;
       for (const item of (job.items || [])) {
         if (item.done || item.skipped) {
@@ -2067,11 +2591,14 @@ _HTML_TEMPLATE = r"""<!doctype html>
         }
       }
       job.uploadedBytes = job.completedBytes;
-      job.speedBps = 0;
       job.currentIndex = 0;
       job.currentPath = '';
       job.failedCount = 0;
-      setActiveUI(job);
+      // A resumed job starts with bytes already on the server. Without this
+      // reset the meter would divide them by a fresh clock and report an
+      // absurd speed (and an ETA of almost zero).
+      resetRateMeter();
+      startTicker();
       renderQueue();
 
       $('abortBtn').disabled = false;
@@ -2087,20 +2614,19 @@ _HTML_TEMPLATE = r"""<!doctype html>
           } else {
             item.sha256 = res.sha256 || '';
             item.done = true;
-            sessionUploadedBytes += (item.file.size || 0);
+            session.uploadedBytes += (item.file.size || 0);
           }
           item.failed = false;
           item.lastError = '';
           job.completedBytes += (item.file.size || 0);
           job.uploadedBytes = job.completedBytes;
-          setActiveUI(job);
-          renderQueue();
+          renderStatus();
         } catch (e) {
           if (job.status === 'canceled') break;
           item.failed = true;
           item.lastError = (e && e.message) ? e.message : String(e);
           job.failedCount += 1;
-          renderQueue();
+          renderStatus();
         }
       }
 
@@ -2108,6 +2634,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
       activeXhr = null;
       job.endedAt = performance.now();
       job.durationSec = (job.endedAt - job.startedAt) / 1000;
+      // Fold this run into the session total, then detach startedAt so the
+      // same span cannot be counted twice by totalActiveMs().
+      session.activeMs += Math.max(0, job.endedAt - job.startedAt);
+      job.startedAt = null;
+      stopTicker();
       if (job.status === 'uploading') {
         const remaining = (job.items || []).filter(it => !it.done && !it.skipped);
         if (remaining.length > 0) {
@@ -2117,30 +2648,17 @@ _HTML_TEMPLATE = r"""<!doctype html>
           job.status = 'done';
         }
       }
-      setActiveUI(null);
       renderQueue();
-    }
-
-    function getOverallTotals() {
-      let totalBytes = 0;
-      let uploadedBytes = 0;
-      let startedAt = null;
-      let speedBps = 0;
-      for (const job of queue) {
-        totalBytes += (job.totalBytes || 0);
-        uploadedBytes += (job.uploadedBytes || 0);
-        if (job.startedAt && (startedAt === null || job.startedAt < startedAt)) {
-          startedAt = job.startedAt;
-        }
-        if (job.status === 'uploading') speedBps = job.speedBps || 0;
-      }
-      return { totalBytes, uploadedBytes, startedAt, speedBps };
     }
 
     async function pumpQueue() {
       if (activeJob) return;
       const next = queue.find(j => j.status === 'queued');
-      if (!next) return;
+      if (!next) {
+        stopTicker();
+        renderStatus(true);
+        return;
+      }
       activeJob = next;
       try {
         await runJob(next);
@@ -2155,8 +2673,26 @@ _HTML_TEMPLATE = r"""<!doctype html>
       activeJob.status = 'canceled';
       activeJob.error = 'Canceled';
       if (activeXhr) activeXhr.abort();
-      setActiveUI(null);
-      renderQueue();
+      renderStatus(true);
+    });
+
+    $('clearDoneBtn').addEventListener('click', () => {
+      withActionLock('clearDone', () => {
+        for (let i = queue.length - 1; i >= 0; i--) {
+          const s = queue[i].status;
+          if (s === 'done' || s === 'error' || s === 'canceled') queue.splice(i, 1);
+        }
+        renderQueue();
+      });
+    });
+
+    // An accidental reload throws away an hour-long queue; browsers only
+    // honour this while the tab has actual work in flight.
+    window.addEventListener('beforeunload', (e) => {
+      const busy = activeJob || queue.some(j => j.status === 'queued' || j.status === 'preflight');
+      if (!busy) return;
+      e.preventDefault();
+      e.returnValue = '';
     });
 
     $('singleFile').addEventListener('change', (e) => {
@@ -2165,11 +2701,75 @@ _HTML_TEMPLATE = r"""<!doctype html>
       $('singleFileWarn').className = 'meta';
       e.target.classList.remove('warn');
     });
+    // The OS folder dialog can only ever return one directory, so several
+    // folders are collected across picks (or dropped in together) and each
+    // one becomes its own queue entry.
+    const stagedFolders = [];
+
+    function renderStaged() {
+      const list = $('folderStaged');
+      list.innerHTML = '';
+      let files = 0;
+      let bytes = 0;
+      for (const folder of stagedFolders) {
+        files += folder.items.length;
+        bytes += folder.totalBytes;
+
+        const li = document.createElement('li');
+        li.className = 'stagedRow';
+        const name = document.createElement('span');
+        name.className = 'stagedName';
+        name.textContent = `${folder.name} — ${folder.items.length} file(s), ${formatBytes(folder.totalBytes)}`;
+        const drop = document.createElement('button');
+        drop.className = 'btn secondary icon';
+        drop.type = 'button';
+        drop.textContent = '✕';
+        drop.title = `Remove ${folder.name}`;
+        drop.setAttribute('aria-label', `Remove ${folder.name}`);
+        drop.onclick = () => {
+          const idx = stagedFolders.indexOf(folder);
+          if (idx >= 0) stagedFolders.splice(idx, 1);
+          renderStaged();
+        };
+        li.appendChild(name);
+        li.appendChild(drop);
+        list.appendChild(li);
+      }
+      $('folderFileInfo').textContent = stagedFolders.length
+        ? `${stagedFolders.length} folder(s), ${files} file(s), ${formatBytes(bytes)}`
+        : '';
+    }
+
+    function stageFolder(name, items) {
+      if (!items.length) return;
+      const totalBytes = items.reduce((a, it) => a + (it.file.size || 0), 0);
+      const existing = stagedFolders.findIndex(f => f.name === name);
+      const entry = { name, items, totalBytes };
+      if (existing >= 0) stagedFolders[existing] = entry;
+      else stagedFolders.push(entry);
+    }
+
     $('folderInput').addEventListener('change', (e) => {
-      $('folderFileInfo').textContent = summarizeSelection(e.target.files);
+      const files = e.target.files ? Array.from(e.target.files) : [];
+      const byRoot = new Map();
+      for (const f of files) {
+        const rel = f.webkitRelativePath || f.name;
+        const root = rel.split('/')[0] || 'Folder';
+        if (!byRoot.has(root)) byRoot.set(root, []);
+        byRoot.get(root).push({ file: f, path: rel });
+      }
+      for (const [root, items] of byRoot) stageFolder(root, items);
+      // Clearing the value lets the same folder be picked again later.
+      e.target.value = '';
+      renderStaged();
       $('folderWarn').textContent = '';
       $('folderWarn').className = 'meta';
       e.target.classList.remove('warn');
+    });
+
+    $('folderClearBtn').addEventListener('click', () => {
+      stagedFolders.length = 0;
+      renderStaged();
     });
 
     $('singleFileForm').addEventListener('submit', async (e) => {
@@ -2184,60 +2784,129 @@ _HTML_TEMPLATE = r"""<!doctype html>
         return;
       }
 
-      const total = files.reduce((a, f) => a + (f.size || 0), 0);
       const label =
         files.length === 1
           ? `File: ${files[0].name}`
           : `Files: ${files.length} (${files[0].name} ...)`;
-
-      const job = {
-        id: newId().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 72),
-        label,
-        kind: 'files',
-        items: files.map(f => ({ file: f, path: f.name })),
-        totalBytes: total,
-        uploadedBytes: 0,
-        completedBytes: 0,
-        status: 'new',
-        error: '',
-        onExists: 'skip',
-      };
+      const items = files.map(f => ({ file: f, path: f.name }));
       input.value = '';
       $('singleFileInfo').textContent = '';
-      await enqueueJob(job);
+      await enqueueJob(makeJob(label, 'files', items));
     });
 
     $('folderForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       $('pageError').style.display = 'none';
-      const input = $('folderInput');
-      const files = input.files ? Array.from(input.files) : [];
-      if (!files.length) {
-        $('folderWarn').textContent = 'Please select a folder first.';
+      if (!stagedFolders.length) {
+        $('folderWarn').textContent = 'Please select at least one folder first.';
         $('folderWarn').className = 'meta warn';
-        input.classList.add('warn');
+        $('folderInput').classList.add('warn');
+        return;
+      }
+      const pending = stagedFolders.splice(0, stagedFolders.length);
+      renderStaged();
+      for (const folder of pending) {
+        await enqueueJob(makeJob(`Folder: ${folder.name}`, 'folder', folder.items));
+      }
+    });
+
+    async function collectEntry(entry, prefix, out) {
+      if (!entry) return;
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        out.push({ file, path: `${prefix}${entry.name}` });
+        return;
+      }
+      if (!entry.isDirectory) return;
+      const reader = entry.createReader();
+      const childPrefix = `${prefix}${entry.name}/`;
+      // readEntries() hands out at most 100 children per call and signals the
+      // end with an empty batch, so it has to be drained in a loop.
+      for (;;) {
+        const batch = await new Promise((ok, fail) => reader.readEntries(ok, fail));
+        if (!batch.length) break;
+        for (const child of batch) await collectEntry(child, childPrefix, out);
+      }
+    }
+
+    const dropZone = $('dropZone');
+
+    function dragHasFiles(ev) {
+      // A queue row being reordered must not be mistaken for a file drop.
+      if (dragJobId) return false;
+      const types = ev.dataTransfer ? ev.dataTransfer.types : null;
+      return !!types && Array.prototype.indexOf.call(types, 'Files') >= 0;
+    }
+
+    let dragDepth = 0;
+    window.addEventListener('dragenter', (ev) => {
+      if (!dragHasFiles(ev)) return;
+      dragDepth += 1;
+      dropZone.classList.add('over');
+    });
+    window.addEventListener('dragleave', (ev) => {
+      if (!dragHasFiles(ev)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) dropZone.classList.remove('over');
+    });
+    window.addEventListener('dragover', (ev) => {
+      if (!dragHasFiles(ev)) return;
+      // Without this the browser navigates away to the dropped file.
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy';
+    });
+    window.addEventListener('drop', async (ev) => {
+      if (!dragHasFiles(ev)) return;
+      ev.preventDefault();
+      dragDepth = 0;
+      dropZone.classList.remove('over');
+      $('pageError').style.display = 'none';
+
+      const dt = ev.dataTransfer;
+      // webkitGetAsEntry() has to run before this handler yields; the item
+      // list is emptied as soon as the event finishes dispatching.
+      const entries = dt && dt.items
+        ? Array.from(dt.items)
+            .filter(it => it.kind === 'file')
+            .map(it => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
+            .filter(Boolean)
+        : [];
+
+      if (!entries.length) {
+        // Browser without the entries API: files only, no folder structure.
+        const files = dt && dt.files ? Array.from(dt.files) : [];
+        if (!files.length) return;
+        const label = files.length === 1
+          ? `File: ${files[0].name}`
+          : `Files: ${files.length} (${files[0].name} ...)`;
+        await enqueueJob(makeJob(label, 'files', files.map(f => ({ file: f, path: f.name }))));
         return;
       }
 
-      const root = (files[0].webkitRelativePath || '').split('/')[0] || 'Folder';
-      const items = files.map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
-      const total = items.reduce((a, it) => a + (it.file.size || 0), 0);
+      const looseFiles = [];
+      const folders = [];
+      for (const entry of entries) {
+        const out = [];
+        try {
+          await collectEntry(entry, '', out);
+        } catch (err) {
+          showPageError(`Could not read "${entry.name}": ${(err && err.message) || err}`);
+          continue;
+        }
+        if (!out.length) continue;
+        if (entry.isDirectory) folders.push({ name: entry.name, items: out });
+        else looseFiles.push(...out);
+      }
 
-      const job = {
-        id: newId().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 72),
-        label: `Folder: ${root}`,
-        kind: 'folder',
-        items,
-        totalBytes: total,
-        uploadedBytes: 0,
-        completedBytes: 0,
-        status: 'new',
-        error: '',
-        onExists: 'skip',
-      };
-      input.value = '';
-      $('folderFileInfo').textContent = '';
-      await enqueueJob(job);
+      if (looseFiles.length) {
+        const label = looseFiles.length === 1
+          ? `File: ${looseFiles[0].path}`
+          : `Files: ${looseFiles.length} (${looseFiles[0].path} ...)`;
+        await enqueueJob(makeJob(label, 'files', looseFiles));
+      }
+      for (const folder of folders) {
+        await enqueueJob(makeJob(`Folder: ${folder.name}`, 'folder', folder.items));
+      }
     });
 
     window.addEventListener('error', (e) => {
@@ -2248,8 +2917,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
       showPageError(`JS error: ${reason}`);
     });
 
+    renderStaged();
     renderQueue();
-    setActiveUI(null);
   })();
   </script>
 </body>
