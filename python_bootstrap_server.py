@@ -158,7 +158,10 @@ class UploadServer(BaseHTTPRequestHandler):
         """Extrahiere sicher den Dateinamen aus dem Header"""
         for line in header.split('\n'):
             if 'filename=' in line:
-                return line.split('filename=')[1].strip('"')
+                # The header line still carries its trailing CR, which sits
+                # after the closing quote -- stripping quotes alone left it on
+                # the extension, so every upload failed the whitelist check.
+                return line.split('filename=')[1].strip().strip('"')
         return None
 
     def _is_allowed_file(self, filename: str) -> bool:
