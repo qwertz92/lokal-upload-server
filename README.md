@@ -130,6 +130,14 @@ python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1
 - Folders panel: choose a folder, then choose another one. Each pick is added to
   the staging list, and `Add to queue` turns every staged folder into its own
   queue entry.
+  - Why pick them one at a time: Chrome, Edge, and Firefox ignore the `multiple`
+    attribute as soon as `webkitdirectory` is set, so their folder dialog returns
+    exactly one directory. This is a browser limitation, not an OS one -- the
+    Windows, macOS, and GTK pickers all support multi-folder selection, and
+    Chromium closed the request as WontFix back in 2013.
+  - Safari on macOS is the exception: it honours both attributes, so you can
+    Cmd-click several folders in one dialog. The staging list handles that too
+    and splits the selection into one entry per folder.
 - Drag and drop: drop files and folders anywhere on the page. To upload several
   folders at once, select them with `Ctrl` in your file manager and drag them in
   together. Each dropped folder becomes its own queue entry.
