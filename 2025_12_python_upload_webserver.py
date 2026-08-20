@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+import sys
+
+# Kept right after the __future__ import (which must stay first) and written in
+# syntax old enough to parse on any Python 3, so an outdated interpreter gets
+# this message instead of a confusing SyntaxError or ImportError further down.
+if sys.version_info < (3, 8):
+    sys.stderr.write(
+        "ERROR: this server needs Python 3.8 or newer.\n"
+        "You are running %s (%s).\n"
+        "Tested on 3.8 - 3.14. Install a newer Python and try again.\n"
+        % (sys.version.split()[0], sys.executable)
+    )
+    raise SystemExit(2)
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +41,16 @@ DEFAULT_PER_CLIENT_LIMIT = 1
 DEFAULT_RETRY_COUNT = 2
 DEFAULT_RETRY_DELAY_MS = 800
 DEFAULT_UPLOAD_TIMEOUT_SEC = 0
+# Idle time allowed on a single socket read before the connection is dropped.
+# Generous enough for a slow link, short enough that a dead client frees its
+# upload slot on its own.
+SOCKET_TIMEOUT_SEC = 300
+# Age after which a finished/abandoned upload session is forgotten.
+SESSION_TTL_SEC = 12 * 3600
+TEMP_PREFIX = ".upload_tmp_"
+# Upper bound for draining the body of a rejected request so the client can
+# still read the status code. Beyond this the connection is simply closed.
+MAX_DISCARD_BYTES = 64 * 1024 * 1024
 
 _INVALID_NAME_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
 _RESERVED_NAMES = {
@@ -37,6 +61,14 @@ _RESERVED_NAMES = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
+
+
+class _RequestError(Exception):
+    """A client-side mistake, carrying the status code to answer with."""
+
+    def __init__(self, message: str, *, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _enable_windows_ansi() -> bool:
@@ -123,7 +155,8 @@ def _sanitize_name_part(name: str) -> str:
     name = name.rstrip(" .")
     if not name:
         name = "_"
-    if name.upper() in _RESERVED_NAMES:
+    # "con.txt" is just as unwritable on Windows as "con".
+    if name.split(".")[0].upper() in _RESERVED_NAMES:
         name = f"_{name}_"
     return name
 
@@ -190,6 +223,18 @@ class _ServerState:
         total_bytes: int,
     ) -> None:
         with self._lock:
+            # Sessions are only dropped when every file of a job succeeds, so
+            # abandoned tabs and partly failed jobs would accumulate forever on
+            # a server that stays up for weeks. Expire them by age here, which
+            # is the one place a new session is registered.
+            cutoff = time.time() - SESSION_TTL_SEC
+            stale = [
+                key
+                for key, entry in self._sessions.items()
+                if float(entry.get("created_at", 0)) < cutoff
+            ]
+            for key in stale:
+                self._sessions.pop(key, None)
             self._sessions[upload_id] = {
                 "upload_id": upload_id,
                 "client_ip": client_ip,
@@ -285,11 +330,30 @@ def _render_html() -> str:
     html = html.replace(
         "__UPLOAD_TIMEOUT_MS__", str(int(_HTML_CONFIG["upload_timeout_ms"]))
     )
+    # Whether two paths collide depends on the server's filesystem, not on the
+    # browser's, so the client is told rather than left to assume.
+    html = html.replace(
+        "__CASE_INSENSITIVE_FS__",
+        "true" if _path_key("A") == _path_key("a") else "false",
+    )
     return html
 
 
 class SimpleUploadServer(BaseHTTPRequestHandler):
     server_version = "SimpleUploadServer/2026.01"
+    # A client that vanishes without closing its TCP connection (laptop asleep,
+    # phone out of Wi-Fi range) would otherwise leave the handler blocked in
+    # rfile.read() forever, holding this IP's upload slot until the OS keepalive
+    # gives up hours later. socketserver applies this to the accepted socket.
+    timeout = SOCKET_TIMEOUT_SEC
+    # Bytes of the current request body not yet read off the socket.
+    _body_remaining: int | None = None
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except socket.timeout:
+            self.close_connection = True
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         return
@@ -330,13 +394,61 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send_bytes(status, body, "application/json; charset=utf-8")
 
+    def _discard_request_body(self) -> None:
+        """Read and throw away whatever the client is still sending.
+
+        Answering an upload without consuming its body closes the socket while
+        megabytes are still in flight. The client then sees a connection reset
+        instead of the status code, and retries a request that was rejected on
+        purpose. Draining first makes the reply actually arrive.
+        """
+        # _body_remaining is what is genuinely still on the wire. Falling back
+        # to Content-Length when it is unset is safe; using it after the body
+        # was already read would block until the socket times out.
+        remaining = self._body_remaining
+        if remaining is None:
+            remaining = self._declared_length()
+        if remaining is None or remaining <= 0:
+            self.close_connection = True
+            return
+        if remaining > MAX_DISCARD_BYTES:
+            # Too much to swallow politely; cut the connection instead.
+            self.close_connection = True
+            return
+        try:
+            while remaining > 0:
+                chunk = self.rfile.read(min(BUFFER_SIZE, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                self._body_remaining = remaining
+        except (OSError, ValueError):
+            self.close_connection = True
+        finally:
+            self._body_remaining = 0
+
+    def _declared_length(self) -> int | None:
+        """Content-Length as an int, or None when it is absent/unusable."""
+        if self.headers.get("Transfer-Encoding"):
+            return None
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+
     def _read_body(self, *, max_bytes: int) -> bytes:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
             return b""
         if length > max_bytes:
-            raise ValueError("Request too large")
+            raise _RequestError("request too large", status=413)
+        self._body_remaining = length
         data = self.rfile.read(length)
+        self._body_remaining = max(0, length - len(data))
         if len(data) != length:
             raise ConnectionError("Client disconnected")
         return data
@@ -352,6 +464,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._note_client_if_new()
+        self._body_remaining: int | None = None
         path = urlparse(self.path).path
         if path == "/api/preflight":
             self._handle_preflight()
@@ -371,15 +484,19 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             upload_id = str(data.get("upload_id") or "").strip()
             items = data.get("items") or []
             if not upload_id or not isinstance(upload_id, str):
-                raise ValueError("upload_id fehlt")
+                raise ValueError("upload_id missing")
             if not re.fullmatch(r"[A-Za-z0-9._-]{6,80}", upload_id):
                 raise ValueError("invalid upload_id")
             if not isinstance(items, list) or not items:
-                raise ValueError("items fehlt/leer")
+                raise ValueError("items missing or empty")
 
             conflicts: list[dict] = []
             total_bytes = 0
             total_files = 0
+            # Only bytes that will really be written count towards the disk
+            # check; re-adding an already uploaded folder must not fail with
+            # "not enough disk space" when nothing would be transferred.
+            incoming_bytes = 0
             seen_paths: set[str] = set()
 
             for item in items:
@@ -417,8 +534,10 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                             "reason": "in_progress",
                         }
                     )
+                else:
+                    incoming_bytes += max(0, size)
 
-            _ensure_disk_space(total_bytes)
+            _ensure_disk_space(incoming_bytes)
 
             STATE.upsert_session(
                 upload_id,
@@ -439,12 +558,15 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 },
             )
         except Exception as e:
-            self._send_json(400, {"ok": False, "error": str(e)})
+            status = e.status if isinstance(e, _RequestError) else 400
+            self._discard_request_body()
+            self._send_json(status, {"ok": False, "error": str(e)})
 
     def _handle_upload(self) -> None:
         ip = self._client_ip()
         sem = STATE.get_ip_semaphore(ip)
         if not sem.acquire(blocking=False):
+            self._discard_request_body()
             self._send_json(
                 429, {"ok": False, "error": "Upload already active (use queue)"}
             )
@@ -471,9 +593,16 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             if on_exists not in {"skip", "overwrite"}:
                 on_exists = "skip"
 
-            content_length = int(self.headers.get("Content-Length", "0") or "0")
-            if content_length < 0:
-                raise ValueError("invalid Content-Length")
+            # Without a length the read loop below would write nothing and
+            # then replace a perfectly good file with an empty one, while
+            # reporting success. Refuse instead of silently destroying data.
+            if self.headers.get("Transfer-Encoding"):
+                raise _RequestError(
+                    "chunked transfer encoding is not supported", status=501
+                )
+            content_length = self._declared_length()
+            if content_length is None:
+                raise _RequestError("missing or invalid Content-Length", status=411)
             _ensure_disk_space(content_length)
 
             session = STATE.get_session(upload_id)
@@ -493,6 +622,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             if not STATE.reserve_path(rel_path, upload_id):
+                self._discard_request_body()
                 self._send_json(
                     409,
                     {"ok": False, "error": "in_progress", "rel_path": rel_path},
@@ -504,6 +634,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 raise ValueError("target path is a directory")
 
             if dest_path.exists() and on_exists == "skip":
+                self._discard_request_body()
                 self._send_json(
                     409,
                     {"ok": False, "error": "exists", "rel_path": rel_path},
@@ -514,7 +645,8 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 f"START id={upload_id} file[{file_index}] ip={ip} path={rel_path} size={_format_bytes(content_length)}"
             )
 
-            fd, tmp = tempfile.mkstemp(prefix=".upload_tmp_", dir=str(dest_path.parent))
+            self._body_remaining = content_length
+            fd, tmp = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=str(dest_path.parent))
             temp_path = Path(tmp)
             hasher = hashlib.sha256()
             bytes_written = 0
@@ -528,6 +660,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     hasher.update(chunk)
                     bytes_written += len(chunk)
                     remaining -= len(chunk)
+                    self._body_remaining = remaining
 
             digest = hasher.hexdigest()
             os.replace(str(temp_path), str(dest_path))
@@ -558,7 +691,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 },
             )
             STATE.maybe_cleanup(upload_id)
-        except (ConnectionError, BrokenPipeError) as e:
+        except (ConnectionError, BrokenPipeError, socket.timeout) as e:
+            # socket.timeout means the client stopped sending without closing
+            # the connection. That is an abandoned upload, not a server fault.
             if temp_path:
                 try:
                     temp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
@@ -575,9 +710,19 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     temp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
                 except Exception:
                     pass
-            self._log(f"Upload error: ip={ip} err={e}", color=_ANSI_RED)
+            # A bad path or a full disk will fail again on every retry, so it
+            # must not be reported as 5xx: the client retries those, re-sending
+            # the whole file two more times for nothing.
+            status = e.status if isinstance(e, _RequestError) else (
+                400 if isinstance(e, ValueError) else 500
+            )
+            self._log(
+                f"Upload error: ip={ip} status={status} err={e}", color=_ANSI_RED
+            )
             try:
-                self._send_json(500, {"ok": False, "error": str(e)})
+                if status != 500:
+                    self._discard_request_body()
+                self._send_json(status, {"ok": False, "error": str(e)})
             except BrokenPipeError:
                 pass
         finally:
@@ -2172,6 +2317,37 @@ def _build_bind_endpoints(
     return unique
 
 
+class _UploadHTTPServer(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second process bind a port that is already
+    # listening. The duplicate then prints a healthy banner while every request
+    # is served by the first instance, so uploads land in the wrong folder.
+    allow_reuse_address = os.name != "nt"
+
+
+def _sweep_stale_temp_files() -> int:
+    """Delete leftover .upload_tmp_* files from uploads that never finished.
+
+    Killing the process mid-upload strands the temp file, which can be many
+    gigabytes. Only files older than an hour are touched, so a second instance
+    sharing this folder is not robbed of a live upload.
+    """
+    removed = 0
+    cutoff = time.time() - 3600
+    try:
+        candidates = list(UPLOAD_ROOT.rglob(f"{TEMP_PREFIX}*"))
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            if not path.is_file() or path.stat().st_mtime >= cutoff:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def run_server(
     endpoints: list[tuple[str, int]],
     per_client_limit: int = DEFAULT_PER_CLIENT_LIMIT,
@@ -2179,11 +2355,33 @@ def run_server(
     retry_delay_ms: int = DEFAULT_RETRY_DELAY_MS,
     upload_timeout_sec: int = DEFAULT_UPLOAD_TIMEOUT_SEC,
 ) -> None:
+    # Redirecting stdout to a file switches it to block buffering, which hides
+    # the whole banner (including the LAN URL) until the process exits.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+    except (AttributeError, OSError):
+        pass
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     STATE.set_per_ip_limit(per_client_limit)
     _HTML_CONFIG["max_file_retries"] = max(0, int(retry_count))
     _HTML_CONFIG["retry_delay_ms"] = max(0, int(retry_delay_ms))
     _HTML_CONFIG["upload_timeout_ms"] = max(0, int(upload_timeout_sec)) * 1000
+
+    # Bind before announcing anything, so the banner can never advertise a URL
+    # that failed to come up.
+    servers: list[ThreadingHTTPServer] = []
+    bound: list[tuple[str, int]] = []
+    for host, port in endpoints:
+        try:
+            servers.append(_UploadHTTPServer((host, port), SimpleUploadServer))
+            bound.append((host, port))
+        except OSError as exc:
+            print(_c(f"Failed to bind {host}:{port} -> {exc}", _ANSI_RED), flush=True)
+
+    if not servers:
+        raise SystemExit("No server socket could be started. Check host/port values.")
+
+    swept = _sweep_stale_temp_files()
 
     local_ips = _get_local_ipv4_addresses()
     primary_ip = local_ips[0] if local_ips else "127.0.0.1"
@@ -2218,14 +2416,14 @@ def run_server(
     timeout_text = "disabled" if timeout_ms == 0 else f"{timeout_ms // 1000} s"
     _print_kv("Per-file timeout", timeout_text)
     print("Bindings:")
-    for host, port in endpoints:
+    for host, port in bound:
         print(f"    - {host}:{port}")
     print("\nAccess URLs:")
 
     def _print_access(kind: str, url: str) -> None:
         print(f"    - {kind:<8} {url}")
 
-    for host, port in endpoints:
+    for host, port in bound:
         if host in ("", "0.0.0.0"):
             _print_access("local", f"http://localhost:{port}")
             for ip in local_ips[:5]:
@@ -2234,18 +2432,10 @@ def run_server(
             _print_access("host", f"http://{host}:{port}")
     print()
     _print_kv("Storage path", str(UPLOAD_ROOT))
+    if swept:
+        _print_kv("Cleaned up", f"{swept} leftover temp file(s)")
     _print_kv("To stop", "Ctrl+C")
-    print("=" * 60 + "\n")
-
-    servers: list[ThreadingHTTPServer] = []
-    for host, port in endpoints:
-        try:
-            servers.append(ThreadingHTTPServer((host, port), SimpleUploadServer))
-        except OSError as exc:
-            print(f"Failed to bind {host}:{port} -> {exc}")
-
-    if not servers:
-        raise SystemExit("No server socket could be started. Check host/port values.")
+    print("=" * 60 + "\n", flush=True)
 
     threads: list[threading.Thread] = []
     for server in servers:
@@ -2263,9 +2453,65 @@ def run_server(
             server.server_close()
 
 
+def _run_selftest() -> int:
+    """Bind an ephemeral port, fetch the page, and report the result.
+
+    A plain syntax check cannot catch a stdlib module that a newer Python has
+    dropped, because that only fails on import. This starts the real server on
+    the real interpreter, which is what actually needs to keep working.
+    """
+    import urllib.request
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), SimpleUploadServer)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            status = response.status
+            body = response.read()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+    problems = []
+    if status != 200:
+        problems.append(f"GET / returned HTTP {status}")
+    if not body[:200].lstrip().lower().startswith(b"<!doctype html"):
+        problems.append("index page did not start with a HTML doctype")
+    for placeholder in (
+        "__MAX_FILE_RETRIES__",
+        "__RETRY_BASE_DELAY_MS__",
+        "__UPLOAD_TIMEOUT_MS__",
+        "__CASE_INSENSITIVE_FS__",
+    ):
+        if placeholder.encode() in body:
+            problems.append(f"unreplaced template placeholder {placeholder}")
+
+    if problems:
+        for problem in problems:
+            print(_c(f"selftest FAILED: {problem}", _ANSI_RED), flush=True)
+        return 1
+    print(
+        _c(
+            f"selftest OK on Python {platform.python_version()} "
+            f"({len(body)} bytes served)",
+            _ANSI_GREEN,
+        ),
+        flush=True,
+    )
+    return 0
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Local upload server (streaming, queue-based, LAN-first)."
+    )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="Start on a temporary port, fetch the page once, then exit.",
     )
     parser.add_argument(
         "--host",
@@ -2328,6 +2574,8 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+    if args.selftest:
+        raise SystemExit(_run_selftest())
     try:
         endpoints = _build_bind_endpoints(args.host, args.port, args.listen)
     except ValueError as exc:
