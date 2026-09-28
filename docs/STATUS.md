@@ -10,17 +10,18 @@ the authoritative HTTP/browser source and works independently.
 | --- | --- | --- |
 | Existing desktop server stays functional | 30 Python regression tests, including injected Android storage | Passed |
 | Android launch without installing Python | Signed release installed and launched on Android 17, x86-64, 16 KiB pages | Passed |
-| One-time folder setup, then launch by icon | Actual system picker, denied/regranted network permission, persisted folder across APK upgrade | Passed setup; lifecycle checks finishing |
-| Nested files, conflicts, streaming and abort safety | 11 actual HTTP/device checks; exact SHA-256 for a 12 MiB upload | Passed initial APK; final repeat pending |
+| One-time folder setup, then launch by icon | Actual system picker, denied/regranted network permission, persisted folder across APK upgrade | Passed |
+| Nested files, conflicts, streaming and abort safety | 11 actual HTTP/device checks; exact SHA-256 for a 12 MiB upload | Passed on final APK |
+| Native interface | German light/dark and 1.3 font scale; stable running/stopped control bounds; folder/share targets; content clipped outside system bars | Passed |
 | Browser interaction | Windows Chrome form upload, duplicate conflict and confirmed overwrite; saved-byte hashes; stable dialog bounds; no JS errors | Passed |
 | Interrupted replacement recovery | 13 native real-provider scenarios; old APK fails six, corrected APK passes all 13 | Passed |
-| Screen-off operation and explicit stop | Foreground service/device lifecycle checks | Pending |
-| Access limited to per-run link | Missing/wrong capability rejected on supported GET/POST endpoints | Passed; rotation check finishing |
+| Screen-off operation and explicit stop | 4 MiB upload with screen asleep before/after; app and notification Stop close the listener; Recents does not restart it | Passed |
+| Access limited to per-run link | Missing/wrong capability rejected on supported GET/POST endpoints; previous link returns 404 after icon restart | Passed |
 | Installable delivery | Release signature and installed/delivery APK SHA-256 match | Passed |
 | Independent review | Two rounds with Luna; reviewed fixes have no unresolved P1/P2 findings | Passed |
 
 Delivery: `artifacts/LocalUpload-0.1.0.apk` (35,881,289 bytes), SHA-256
-`458f4a20c1341f6f52ef06853b7fea742429a3bb5d5df9daa79164d05e8bcf3c`.
+`f75071382453aba310eb7666ae9f986e85c48341274d9c5cce3cfc467b026ab9`.
 The APK and raw device/build receipts are generated local artifacts, excluded from
 Git. Rebuild instructions and reproducible checks are in [android/README.md](../android/README.md).
 
@@ -33,3 +34,11 @@ execution, SD-card behavior, router reachability, long-duration suspend behavior
 or vendor battery policies. The APK includes ARM64 libraries, but that ABI and
 older supported Android versions have not been run on a device in this session.
 Both bundled ABIs pass 16 KiB ELF and APK alignment checks.
+
+Verification used GPT-6 Sol workers and GPT-6 Luna reviewers; child runtime
+metadata was checked. The lead independently reran the Python and final APK
+HTTP tests, inspected recovery receipts, signatures, hashes and UI screenshots.
+
+The temporary counterfactual APK `android/build/initial-release.apk`
+(35,864,881 bytes) was removed after the old/new recovery check. The final APK,
+instrumentation APK and test receipts remain in ignored build/artifact folders.
