@@ -2,7 +2,7 @@
 
 A local Python upload server for LAN usage, with queue support, folder structure preservation, conflict handling, and progress tracking.
 
-## Dependency Model
+## Desktop Dependency Model
 
 - No external dependencies
 - Uses only Python standard library modules
@@ -49,6 +49,48 @@ python 2025_12_python_upload_webserver.py --selftest
   This starts the server on a temporary port, fetches the page once, and exits.
   It catches breakage that a syntax check cannot, such as a standard-library
   module that a newer Python has removed.
+
+## Android app
+
+The Android app requires Android 8 or newer on a 64-bit ARM phone (or an x86-64
+emulator) and runs the same upload server on your phone. Python is bundled in
+the APK: no terminal, Python installation, account or internet service is needed.
+The desktop scripts remain usable independently.
+
+1. Install the signed `LocalUpload-0.1.0.apk` on the phone. If Android blocks the
+   installation, allow **Install unknown apps** for the browser or file manager
+   opening this APK, install it, then disable that permission again.
+2. Open **Local Upload**. Select a local reception folder with **Choose folder**
+   (German: **Ordner wählen**). Create a `Local Upload` subfolder in Documents or
+   Downloads and confirm **Use this folder**. Android does not allow selecting the
+   Downloads root itself. Internal storage and SD cards are supported; cloud
+   document providers are deliberately excluded.
+3. Allow local-network access if Android asks. Allow notifications to keep the
+   server's Stop action visible while another app is open.
+4. Connect the sender and phone to the same trusted Wi-Fi. Open the **complete
+   address shown by the app**, including its random suffix, in the sender's browser.
+   Copy/share the address from the app instead of typing it. Add files or folders
+   to the existing browser upload queue.
+5. Received files appear in your selected folder. Stop the server in the app or
+   its notification when finished. After the one-time setup, opening the app from
+   its icon starts it again.
+
+The foreground notification keeps the transfer visible while the app is in the
+background. The URL changes when the server restarts; old links stop working.
+Anyone with the current URL can upload into the chosen folder, so only share it
+with your sender. Transport is HTTP without encryption: use a trusted local
+network. Guest Wi-Fi client isolation can prevent devices from reaching each
+other even when both show the same Wi-Fi name.
+
+Uploads stream into a temporary document in the destination folder. An existing
+file is kept until its replacement has arrived. The app records replacement
+steps so an interrupted transfer can be recovered without deleting the original.
+SAF does not expose a reliable free-space value for every folder, so the Android
+version may detect a full destination during writing rather than during preflight.
+Files live in the chosen shared folder and remain there after uninstalling the app.
+
+Developer build and signing instructions: [android/README.md](android/README.md).
+Verification coverage and device limits: [docs/STATUS.md](docs/STATUS.md).
 
 ## Start (Windows)
 

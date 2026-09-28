@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/page"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:fillViewport="true" android:padding="20dp" android:clipToPadding="false">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical">
+        <TextView android:id="@+id/title" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/app_name" android:textAppearance="?android:attr/textAppearanceLarge" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:text="@string/intro" />
+        <TextView android:id="@+id/folder_heading" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:text="@string/folder_heading"
+            android:textAppearance="?android:attr/textAppearanceMedium" />
+        <TextView android:id="@+id/folder" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:lines="3" android:ellipsize="end"
+            android:gravity="center_vertical" android:textIsSelectable="true" />
+        <LinearLayout style="?android:attr/buttonBarStyle" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/choose_folder" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:minHeight="64dp" android:text="@string/choose_folder" />
+            <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/open_folder" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:minHeight="64dp" android:text="@string/open_folder" />
+        </LinearLayout>
+        <TextView android:id="@+id/server_heading" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:text="@string/server_heading"
+            android:textAppearance="?android:attr/textAppearanceMedium" />
+        <TextView android:id="@+id/status" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:lines="4" android:scrollbars="vertical"
+            android:gravity="center_vertical" android:accessibilityLiveRegion="polite" />
+        <LinearLayout style="?android:attr/buttonBarStyle" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/start" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:minHeight="56dp" android:text="@string/start" />
+            <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/stop" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:minHeight="56dp" android:text="@string/stop" />
+        </LinearLayout>
+        <TextView android:id="@+id/address_heading" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:text="@string/address_heading"
+            android:textAppearance="?android:attr/textAppearanceMedium" />
+        <TextView android:id="@+id/address" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:lines="5" android:scrollbars="vertical"
+            android:fontFamily="monospace" android:textIsSelectable="true" android:gravity="center_vertical" />
+        <LinearLayout style="?android:attr/buttonBarStyle" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/copy" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:minHeight="64dp" android:text="@string/copy_address" />
+            <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/share" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:minHeight="64dp" android:text="@string/share_address" />
+        </LinearLayout>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:layout_marginBottom="16dp" android:text="@string/trust_note" />
+        <Button android:id="@+id/licenses" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:minHeight="56dp" android:text="@string/licenses" />
+    </LinearLayout>
+</ScrollView>

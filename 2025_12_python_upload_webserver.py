@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 import argparse
 import ctypes
 import datetime as _dt
+import errno
 import hashlib
 import json
 import os
@@ -32,6 +33,7 @@ import threading
 import time
 
 UPLOAD_ROOT = Path("uploads").resolve()
+STORAGE = None
 BUFFER_SIZE = 8 * 1024 * 1024
 MAX_PREFLIGHT_BYTES = 20 * 1024 * 1024
 DISK_SPACE_FACTOR = 1.1
@@ -148,6 +150,51 @@ def _ensure_disk_space(required_bytes: int) -> None:
             f"Not enough disk space. Required: {_format_bytes(required)}, "
             f"Available: {_format_bytes(free)}"
         )
+
+
+class _LocalStorage:
+    def initialize(self) -> None:
+        UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+    def _resolve(self, rel_path: str) -> Path:
+        target = (UPLOAD_ROOT / rel_path).resolve()
+        if UPLOAD_ROOT not in target.parents and target != UPLOAD_ROOT:
+            raise ValueError("invalid target path")
+        return target
+
+    def exists(self, rel_path: str) -> bool:
+        return self._resolve(rel_path).exists()
+
+    def is_dir(self, rel_path: str) -> bool:
+        return self._resolve(rel_path).is_dir()
+
+    def check_space(self, required_bytes: int) -> None:
+        _ensure_disk_space(required_bytes)
+
+    def begin(self, rel_path: str):
+        target = self._resolve(rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, ticket = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=str(target.parent))
+        try:
+            return os.fdopen(fd, "wb"), Path(ticket)
+        except Exception:
+            os.close(fd)
+            Path(ticket).unlink()
+            raise
+
+    def commit(self, ticket, rel_path: str, overwrite: bool, digest: str) -> None:
+        target = self._resolve(rel_path)
+        if target.is_dir():
+            raise ValueError("target path is a directory")
+        if target.exists() and not overwrite:
+            raise _RequestError("exists", status=409)
+        os.replace(str(ticket), str(target))
+
+    def abort(self, ticket) -> None:
+        Path(ticket).unlink(missing_ok=True)
+
+
+_LOCAL_STORAGE = _LocalStorage()
 
 
 def _sanitize_name_part(name: str) -> str:
@@ -349,6 +396,11 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
     # Bytes of the current request body not yet read off the socket.
     _body_remaining: int | None = None
 
+    def setup(self) -> None:
+        super().setup()
+        self.storage = getattr(self.server, "storage", STORAGE) or _LOCAL_STORAGE
+        self.state = getattr(self.server, "state", STATE)
+
     def handle_one_request(self) -> None:
         try:
             super().handle_one_request()
@@ -373,7 +425,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
     def _note_client_if_new(self) -> None:
         ip = self._client_ip()
         ua = self.headers.get("User-Agent")
-        if STATE.note_client(ip):
+        if self.state.note_client(ip):
             details = f"New client: ip={ip}"
             if ua:
                 details += f" ua={ua}"
@@ -476,7 +528,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
 
     def _handle_preflight(self) -> None:
         try:
-            UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+            self.storage.initialize()
 
             body = self._read_body(max_bytes=MAX_PREFLIGHT_BYTES)
             data = json.loads(body.decode("utf-8")) if body else {}
@@ -519,14 +571,11 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 total_bytes += max(0, size)
                 total_files += 1
 
-                dest_path = (UPLOAD_ROOT / rel_path).resolve()
-                if UPLOAD_ROOT not in dest_path.parents and dest_path != UPLOAD_ROOT:
-                    raise ValueError("invalid target path")
-                if dest_path.exists():
+                if self.storage.exists(rel_path):
                     conflicts.append(
                         {"path": raw_path, "rel_path": rel_path, "reason": "exists"}
                     )
-                elif STATE.is_path_reserved(rel_path, exclude_upload_id=upload_id):
+                elif self.state.is_path_reserved(rel_path, exclude_upload_id=upload_id):
                     conflicts.append(
                         {
                             "path": raw_path,
@@ -537,9 +586,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 else:
                     incoming_bytes += max(0, size)
 
-            _ensure_disk_space(incoming_bytes)
+            self.storage.check_space(incoming_bytes)
 
-            STATE.upsert_session(
+            self.state.upsert_session(
                 upload_id,
                 client_ip=self._client_ip(),
                 user_agent=self.headers.get("User-Agent"),
@@ -564,7 +613,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
 
     def _handle_upload(self) -> None:
         ip = self._client_ip()
-        sem = STATE.get_ip_semaphore(ip)
+        sem = self.state.get_ip_semaphore(ip)
         if not sem.acquire(blocking=False):
             self._discard_request_body()
             self._send_json(
@@ -572,7 +621,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             )
             return
 
-        temp_path: Path | None = None
+        ticket = None
         path_reserved = False
         upload_id = ""
         rel_path = ""
@@ -585,7 +634,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             on_exists = ((qs.get("on_exists") or ["skip"])[0] or "skip").strip().lower()
             file_index = int((qs.get("file_index") or ["0"])[0] or 0)
 
-            UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+            self.storage.initialize()
 
             if not upload_id or not re.fullmatch(r"[A-Za-z0-9._-]{6,80}", upload_id):
                 raise ValueError("invalid upload_id")
@@ -603,9 +652,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             content_length = self._declared_length()
             if content_length is None:
                 raise _RequestError("missing or invalid Content-Length", status=411)
-            _ensure_disk_space(content_length)
+            self.storage.check_space(content_length)
 
-            session = STATE.get_session(upload_id)
+            session = self.state.get_session(upload_id)
             if session and not session.get("started_logged"):
                 ua = session.get("user_agent")
                 ua_part = f" ua={ua}" if ua else ""
@@ -614,14 +663,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     f"files={session.get('total_files')} total={_format_bytes(int(session.get('total_bytes') or 0))}{ua_part}",
                     color=_ANSI_YELLOW,
                 )
-                STATE.mark_started_logged(upload_id)
+                self.state.mark_started_logged(upload_id)
 
-            dest_path = (UPLOAD_ROOT / rel_path).resolve()
-            if UPLOAD_ROOT not in dest_path.parents and dest_path != UPLOAD_ROOT:
-                raise ValueError("invalid target path")
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if not STATE.reserve_path(rel_path, upload_id):
+            if not self.state.reserve_path(rel_path, upload_id):
                 self._discard_request_body()
                 self._send_json(
                     409,
@@ -630,10 +674,10 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 return
             path_reserved = True
 
-            if dest_path.exists() and dest_path.is_dir():
+            if self.storage.is_dir(rel_path):
                 raise ValueError("target path is a directory")
 
-            if dest_path.exists() and on_exists == "skip":
+            if self.storage.exists(rel_path) and on_exists == "skip":
                 self._discard_request_body()
                 self._send_json(
                     409,
@@ -646,27 +690,26 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             )
 
             self._body_remaining = content_length
-            fd, tmp = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=str(dest_path.parent))
-            temp_path = Path(tmp)
+            stream, ticket = self.storage.begin(rel_path)
             hasher = hashlib.sha256()
             bytes_written = 0
-            with os.fdopen(fd, "wb") as f:
+            with stream as f:
                 remaining = content_length
                 while remaining > 0:
                     chunk = self.rfile.read(min(BUFFER_SIZE, remaining))
                     if not chunk:
                         raise ConnectionError("Client disconnected (abort?)")
+                    remaining -= len(chunk)
+                    self._body_remaining = remaining
                     f.write(chunk)
                     hasher.update(chunk)
                     bytes_written += len(chunk)
-                    remaining -= len(chunk)
-                    self._body_remaining = remaining
 
             digest = hasher.hexdigest()
-            os.replace(str(temp_path), str(dest_path))
-            temp_path = None
+            self.storage.commit(ticket, rel_path, on_exists == "overwrite", digest)
+            ticket = None
 
-            done_files, total_files, total_bytes = STATE.bump_done(
+            done_files, total_files, total_bytes = self.state.bump_done(
                 upload_id, bytes_written=bytes_written
             )
             self._log(
@@ -690,29 +733,21 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                     "total_bytes": total_bytes,
                 },
             )
-            STATE.maybe_cleanup(upload_id)
+            self.state.maybe_cleanup(upload_id)
         except (ConnectionError, BrokenPipeError, socket.timeout) as e:
             # socket.timeout means the client stopped sending without closing
             # the connection. That is an abandoned upload, not a server fault.
-            if temp_path:
-                try:
-                    temp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
-                except Exception:
-                    pass
             reason = str(e) or "Client disconnected"
             self._log(
                 f"Upload aborted: id={upload_id or '?'} ip={ip} path={rel_path or '?'} reason={reason}",
                 color=_ANSI_YELLOW,
             )
         except Exception as e:
-            if temp_path:
-                try:
-                    temp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
-                except Exception:
-                    pass
             # A bad path or a full disk will fail again on every retry, so it
             # must not be reported as 5xx: the client retries those, re-sending
             # the whole file two more times for nothing.
+            if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                e = _RequestError("Not enough disk space", status=400)
             status = e.status if isinstance(e, _RequestError) else (
                 400 if isinstance(e, ValueError) else 500
             )
@@ -726,8 +761,13 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
         finally:
+            if ticket is not None:
+                try:
+                    self.storage.abort(ticket)
+                except Exception as exc:
+                    self._log(f"Temporary upload cleanup failed: {exc}", color=_ANSI_RED)
             if path_reserved and rel_path and upload_id:
-                STATE.release_path(rel_path, upload_id)
+                self.state.release_path(rel_path, upload_id)
             try:
                 sem.release()
             except ValueError:
@@ -2347,7 +2387,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         items: job.items.map(it => ({ path: it.path, size: it.file.size || 0 })),
       };
       try {
-        const res = await fetch('/api/preflight', {
+        const res = await fetch('api/preflight', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
@@ -2480,7 +2520,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         activeXhr = xhr;
         xhr.responseType = 'json';
         xhr.timeout = UPLOAD_TIMEOUT_MS > 0 ? UPLOAD_TIMEOUT_MS : 0;
-        xhr.open('POST', `/api/upload?${params.toString()}`, true);
+        xhr.open('POST', `api/upload?${params.toString()}`, true);
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
         // Progress events only carry data; the ticker owns every redraw.

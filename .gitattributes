@@ -1,20 +1,6 @@
-# Text-Dateien standardmäßig mit LF (Unix-Style) speichern
-* text=auto
-
-# Python-Dateien explizit als Text mit LF markieren
-*.py text eol=lf
-
-# Spezifische Textdateien mit LF
-*.xml text eol=lf
-*.json text eol=lf
-*.md text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-
-# Binärdateien, die nicht verändert werden sollen
-*.png binary
-*.jpg binary
-*.gif binary
-*.ico binary
-*.zip binary
-*.pdf binary
+# Gradle launchers must keep the line endings required by their host shells.
+android/gradlew text eol=lf
+android/check.sh text eol=lf
+android/gradlew.bat text eol=crlf
+# Preserve the bundled upstream legal notices verbatim, including their whitespace.
+android/app/src/main/assets/third_party_notices.txt -whitespace

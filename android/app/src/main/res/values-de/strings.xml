@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="intro">Lade Dateien von einem anderen Gerät im selben WLAN oder Ethernet-Netz auf dieses Handy.</string>
+    <string name="folder_heading">Upload-Ordner</string>
+    <string name="folder_missing">Wähle einen lokalen Ordner im internen Speicher oder auf einer SD-Karte.</string>
+    <string name="choose_folder">Ordner wählen</string>
+    <string name="open_folder">Ordner öffnen</string>
+    <string name="server_heading">Server</string>
+    <string name="server_stopped">Gestoppt. Tippe auf Start, um Uploads anzunehmen.</string>
+    <string name="server_starting">Startet…</string>
+    <string name="server_stopping">Stoppt…</string>
+    <string name="server_running">Läuft. Öffne die Adresse unten auf deinem anderen Gerät.</string>
+    <string name="server_offline">Läuft, aber keine WLAN- oder Ethernet-IPv4-Adresse verfügbar. Verbinde beide Geräte mit demselben lokalen Netz.</string>
+    <string name="server_error">Server konnte nicht ausgeführt werden:
+%1$s</string>
+    <string name="start">Start</string>
+    <string name="stop">Stopp</string>
+    <string name="address_heading">Adresse für den Browser</string>
+    <string name="address_missing">Die Adresse erscheint, während der Server läuft und mit WLAN oder Ethernet verbunden ist.</string>
+    <string name="copy_address">Adresse kopieren</string>
+    <string name="share_address">Adresse teilen</string>
+    <string name="address_copied">Adresse kopiert</string>
+    <string name="trust_note">Nur in einem vertrauenswürdigen lokalen Netz verwenden. HTTP verschlüsselt weder Uploads noch die Adresse. Wer diese Adresse kennt, kann auf den gewählten Ordner zugreifen, solange der Server läuft. Stoppe ihn nach Gebrauch; jeder Start erzeugt eine neue private Adresse.</string>
+    <string name="notification_channel">Lokale Uploads</string>
+    <string name="notification_running">Nimmt lokale Uploads an. Tippen zeigt die Adresse.</string>
+    <string name="notification_offline">Wartet auf WLAN oder Ethernet.</string>
+    <string name="folder_permission_error">Der Ordner muss dauerhaften Lese- und Schreibzugriff erlauben. Wähle einen lokalen, beschreibbaren Ordner.</string>
+    <string name="folder_open_error">Kein installierter Dateimanager kann diesen Ordner öffnen. Öffne ihn stattdessen in deiner Dateien-App.</string>
+    <string name="network_permission_required">Erlaube den Zugriff auf das lokale Netz, damit andere Geräte Dateien auf dieses Handy hochladen können. Du kannst dies in den App-Berechtigungen aktivieren.</string>
+    <string name="open_settings">Einstellungen öffnen</string>
+    <string name="close">Schließen</string>
+    <string name="licenses">Open-Source-Lizenzen</string>
+    <string name="licenses_error">Die enthaltenen Lizenzhinweise konnten nicht geöffnet werden.</string>
+</resources>

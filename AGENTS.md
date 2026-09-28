@@ -19,3 +19,5 @@ in English. The existing MIT license remains authoritative.
 - Work on `main`, commit signed logical changes and push after local checks pass.
 
 Current coverage and outstanding device checks: [docs/STATUS.md](docs/STATUS.md).
+Open findings: [docs/BUGS.md](docs/BUGS.md).
+Implementation and review lessons: [docs/HISTORY.md](docs/HISTORY.md).

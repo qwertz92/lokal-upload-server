@@ -1,0 +1,95 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+def signingProperties = new Properties()
+def signingPath = providers.gradleProperty('localUploadSigningProperties')
+        .orElse(providers.environmentVariable('LOCAL_UPLOAD_SIGNING_PROPERTIES')).orNull
+if (signingPath != null) {
+    file(signingPath).withInputStream { signingProperties.load(it) }
+}
+def signingKeys = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword']
+def hasReleaseSigning = signingKeys.every { signingProperties.getProperty(it)?.trim() }
+
+android {
+    namespace = 'at.farfeleder.localupload'
+    compileSdk = 37
+    buildToolsVersion = '37.0.0'
+
+    defaultConfig {
+        applicationId = 'at.farfeleder.localupload'
+        minSdk = 26
+        targetSdk = 37
+        versionCode = 1
+        versionName = '0.1.0'
+        testInstrumentationRunner = 'at.farfeleder.localupload.SafStorageRecoveryCheck'
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+    }
+    testBuildType = 'release'
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile = file(signingProperties.getProperty('storeFile'))
+                storePassword = signingProperties.getProperty('storePassword')
+                keyAlias = signingProperties.getProperty('keyAlias')
+                keyPassword = signingProperties.getProperty('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            if (hasReleaseSigning) signingConfig = signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    packaging {
+        jniLibs {
+            // Chaquopy ships these stripped; ELF sections checked for both ABIs. No NDK re-strip is needed.
+            keepDebugSymbols += ['**/libchaquopy_java.so', '**/libcrypto_chaquopy.so',
+                '**/libcrypto_python.so', '**/libpython3.14.so', '**/libsqlite3_chaquopy.so',
+                '**/libsqlite3_python.so', '**/libssl_chaquopy.so', '**/libssl_python.so']
+        }
+    }
+    lint {
+        abortOnError = true
+        warningsAsErrors = true
+        checkReleaseBuilds = true
+    }
+}
+
+// Copy only into build output: the desktop server remains the single source of truth.
+def bundleUploadServer = tasks.register('bundleUploadServer', Copy) {
+    from('../../2025_12_python_upload_webserver.py')
+    into(layout.buildDirectory.dir('generated/python'))
+    rename { 'upload_server.py' }
+}
+
+chaquopy {
+    defaultConfig {
+        version = '3.14'
+        pyc { src = true }
+    }
+    sourceSets {
+        main { srcDir(layout.buildDirectory.dir('generated/python')) }
+    }
+}
+
+tasks.configureEach {
+    if (name.startsWith('generate') && name.contains('Python')) dependsOn(bundleUploadServer)
+    if (name.startsWith('merge') && name.endsWith('PythonSources')) dependsOn(bundleUploadServer)
+    if (name == 'preReleaseBuild' || name == 'preReleaseAndroidTestBuild') {
+        doFirst {
+            if (!hasReleaseSigning) {
+                throw new GradleException('Release signing is required. Set LOCAL_UPLOAD_SIGNING_PROPERTIES to an external properties file with storeFile, storePassword, keyAlias and keyPassword.')
+            }
+        }
+    }
+}
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['-Xlint:all', '-Werror']
+}

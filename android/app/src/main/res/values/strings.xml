@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">Local Upload</string>
+    <string name="intro">Upload files to this phone from another device on the same Wi-Fi or Ethernet network.</string>
+    <string name="folder_heading">Upload folder</string>
+    <string name="folder_missing">Choose a local folder in internal storage or on an SD card.</string>
+    <string name="choose_folder">Choose folder</string>
+    <string name="open_folder">Open folder</string>
+    <string name="server_heading">Server</string>
+    <string name="server_stopped">Stopped. Tap Start to accept uploads.</string>
+    <string name="server_starting">Starting…</string>
+    <string name="server_stopping">Stopping…</string>
+    <string name="server_running">Running. Open the address below on your other device.</string>
+    <string name="server_offline">Running, but no Wi-Fi or Ethernet IPv4 address is available. Connect both devices to the same local network.</string>
+    <string name="server_error">Could not run the server:
+%1$s</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="address_heading">Browser address</string>
+    <string name="address_missing">An address appears while the server is running and connected to Wi-Fi or Ethernet.</string>
+    <string name="copy_address">Copy address</string>
+    <string name="share_address">Share address</string>
+    <string name="address_copied">Address copied</string>
+    <string name="trust_note">Use only a trusted local network. HTTP does not encrypt uploads or the address. Anyone with this address can access the selected folder while the server runs. Stop the server when finished; each start creates a new private address.</string>
+    <string name="notification_channel">Local uploads</string>
+    <string name="notification_running">Accepting local uploads. Tap to see the address.</string>
+    <string name="notification_offline">Waiting for Wi-Fi or Ethernet.</string>
+    <string name="folder_permission_error">The folder must allow persistent read and write access. Choose a local writable folder.</string>
+    <string name="folder_open_error">No installed file manager can open this folder. Open it from your Files app instead.</string>
+    <string name="network_permission_required">Allow access to the local network so other devices can upload to this phone. You can enable it in this app’s permissions.</string>
+    <string name="open_settings">Open settings</string>
+    <string name="close">Close</string>
+    <string name="licenses">Open-source licenses</string>
+    <string name="licenses_error">Could not open the bundled license notices.</string>
+</resources>
