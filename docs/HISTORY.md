@@ -1,5 +1,9 @@
 # History
 
+## 2026-09-28 — Optional Privacy mode on Android and desktop
+
+Made plain IP/port access the Android default and added an explicit persisted Privacy checkbox; the desktop CLI gets the same optional protection through `--private` and a shared HTTP guard. An in-place 0.1.0-to-0.1.1 upgrade preserves the folder grant and changes the unauthenticated root from 404 to the upload page. Security options must not silently replace the requested simple LAN workflow; verified normal/private uploads, six negative controls and one review round cover this correction.
+
 ## 2026-09-28 — Android 0.1.0 publication
 
 Published the signed, tested APK and its SHA-256 checksum with the `v0.1.0` release. A successful local build is separate from a published download; delivery checks must verify the public assets. Moving release signing to another machine requires the existing app key and password properties, plus explicit custody and backup status. An off-machine key backup has not been verified.

@@ -20,6 +20,7 @@ import android.text.method.ScrollingMovementMethod;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -43,6 +44,7 @@ public final class MainActivity extends Activity {
     private Button stop;
     private Button copy;
     private Button share;
+    private CheckBox privacy;
     private boolean pendingStart;
     private final Runnable update = this::render;
 
@@ -58,6 +60,12 @@ public final class MainActivity extends Activity {
         stop = findViewById(R.id.stop);
         copy = findViewById(R.id.copy);
         share = findViewById(R.id.share);
+        privacy = findViewById(R.id.privacy);
+        privacy.setOnCheckedChangeListener((button, checked) -> {
+            if (!UploadService.snapshot().active()) {
+                preferences().edit().putBoolean(UploadService.PRIVACY_KEY, checked).apply();
+            }
+        });
         status.setMovementMethod(ScrollingMovementMethod.getInstance());
         address.setMovementMethod(ScrollingMovementMethod.getInstance());
         choose.setOnClickListener(view -> pickFolder());
@@ -154,6 +162,8 @@ public final class MainActivity extends Activity {
                 ? getString(R.string.server_error, current.error) : getString(message));
         address.setText(current.urls.isEmpty() ? getString(R.string.address_missing) : String.join("\n\n", current.urls));
         choose.setEnabled(!current.active());
+        privacy.setChecked(preferences().getBoolean(UploadService.PRIVACY_KEY, false));
+        privacy.setEnabled(!current.active());
         open.setEnabled(selected != null);
         start.setEnabled(!current.active());
         stop.setEnabled(current.state == UploadService.STARTING || current.state == UploadService.RUNNING);

@@ -92,7 +92,8 @@ Gradle 10 until its plugin has migrated these APIs. No app lint baseline is used
 
 `UploadService` serializes every Python operation on one process-wide executor:
 
-- `android_server.start(SafStorage, token, 8040)` returns the actual listening port.
+- `android_server.start(SafStorage, token, 8040)` returns the actual listening port;
+  Java `null` / Python `None` selects normal mode, a nonempty token selects Privacy mode.
 - `android_server.stop()` closes the listener and finishes active requests.
 - `SafStorage(Context, persistedTreeUri).validate()` checks the selected folder.
 
@@ -102,6 +103,13 @@ Launching from the app icon starts a previously configured server; an ordinary
 activity resume does not restart it. The notification's stop action uses
 the same shutdown path. The service is deliberately non-sticky and has no boot
 receiver, so Android process termination does not silently reopen access.
+
+Normal mode is the default and publishes `http://IP:port/`, matching the desktop
+server. The optional native Privacy mode checkbox persists the user's choice and
+is disabled during starting, running and stopping. Stop, change the checkbox,
+then Start to use the other mode; changing the preference never restarts the
+server. Only Privacy mode generates a fresh token and includes it in the URL.
+Both modes use unencrypted HTTP and require a trusted local network.
 
 Network callbacks publish only current Wi-Fi/Ethernet IPv4 addresses; mobile and
 VPN interfaces are excluded. Android 17 local-network permission is checked before
@@ -126,6 +134,10 @@ ADB-visible path:
 ```fish
 timeout 180 python scripts/android_smoke.py --base-url "$UPLOAD_URL" --adb "$ADB" --serial "$DEVICE_SERIAL" --device-dir "$DEVICE_FOLDER"
 ```
+
+The command above checks normal mode with `http://host:port/`. For Privacy mode,
+add `--privacy-mode` and supply the complete `http://host:port/token/` URL; this
+also verifies rejection of missing and incorrect tokens on GET and POST routes.
 
 The script checks saved bytes through ADB, including a 12 MiB upload, conflicts,
 traversal rejection, unauthorized requests and aborted replacement. It removes

@@ -48,6 +48,10 @@
             <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/share" android:layout_width="0dp" android:layout_weight="1"
                 android:layout_height="wrap_content" android:minHeight="64dp" android:text="@string/share_address" />
         </LinearLayout>
+        <CheckBox android:id="@+id/privacy" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:minHeight="48dp" android:text="@string/privacy_mode" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/privacy_help" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="24dp" android:layout_marginBottom="16dp" android:text="@string/trust_note" />
         <Button android:id="@+id/licenses" android:layout_width="match_parent"

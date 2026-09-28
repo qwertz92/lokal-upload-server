@@ -13,7 +13,10 @@ in English. The existing MIT license remains authoritative.
 - Uploads must stream with bounded memory. An aborted/failed replacement must
   preserve the previous file, and temporary-file cleanup must not delete user data.
 - Android uses a persisted Storage Access Framework tree grant, not broad storage
-  permissions. Require the per-run capability URL on every Android HTTP endpoint.
+  permissions. Desktop and Android default to the plain IP/port URL. Privacy mode
+  is explicitly optional; when enabled, require its per-run capability on every
+  supported GET/POST endpoint through the shared handler. Changing the Android
+  mode requires a stopped server.
 - Keep keys, signing passwords, received files, SDKs and generated artifacts out of
   Git. A delivered APK must use the project's release key, never a debug key.
 - Work on `main`, commit signed logical changes and push after local checks pass.

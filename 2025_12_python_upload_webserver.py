@@ -22,10 +22,12 @@ import ctypes
 import datetime as _dt
 import errno
 import hashlib
+import hmac
 import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
 import tempfile
@@ -505,7 +507,23 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             raise ConnectionError("Client disconnected")
         return data
 
+    def _authorize(self) -> bool:
+        token = getattr(self.server, "token", None)
+        if token is None:
+            return True
+        parsed = urlparse(self.path)
+        path = parsed.path[1:] if parsed.path.startswith("/") else parsed.path
+        segment, separator, tail = path.partition("/")
+        if not separator or not hmac.compare_digest(segment.encode("utf-8"), token):
+            self.close_connection = True
+            self._send_json(404, {"ok": False, "error": "not_found"})
+            return False
+        self.path = "/" + tail + ("?" + parsed.query if parsed.query else "")
+        return True
+
     def do_GET(self) -> None:
+        if not self._authorize():
+            return
         self._note_client_if_new()
         if urlparse(self.path).path != "/":
             self._send_json(404, {"ok": False, "error": "not_found"})
@@ -515,6 +533,8 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:
+        if not self._authorize():
+            return
         self._note_client_if_new()
         self._body_remaining: int | None = None
         path = urlparse(self.path).path
@@ -3063,6 +3083,7 @@ def run_server(
     retry_count: int = DEFAULT_RETRY_COUNT,
     retry_delay_ms: int = DEFAULT_RETRY_DELAY_MS,
     upload_timeout_sec: int = DEFAULT_UPLOAD_TIMEOUT_SEC,
+    private_mode: bool = False,
 ) -> None:
     # Redirecting stdout to a file switches it to block buffering, which hides
     # the whole banner (including the LAN URL) until the process exits.
@@ -3075,6 +3096,7 @@ def run_server(
     _HTML_CONFIG["max_file_retries"] = max(0, int(retry_count))
     _HTML_CONFIG["retry_delay_ms"] = max(0, int(retry_delay_ms))
     _HTML_CONFIG["upload_timeout_ms"] = max(0, int(upload_timeout_sec)) * 1000
+    token = secrets.token_urlsafe(24) if private_mode else None
 
     # Bind before announcing anything, so the banner can never advertise a URL
     # that failed to come up.
@@ -3082,7 +3104,9 @@ def run_server(
     bound: list[tuple[str, int]] = []
     for host, port in endpoints:
         try:
-            servers.append(_UploadHTTPServer((host, port), SimpleUploadServer))
+            httpd = _UploadHTTPServer((host, port), SimpleUploadServer)
+            httpd.token = token.encode("ascii") if token is not None else None
+            servers.append(httpd)
             bound.append((host, port))
         except OSError as exc:
             print(_c(f"Failed to bind {host}:{port} -> {exc}", _ANSI_RED), flush=True)
@@ -3130,7 +3154,8 @@ def run_server(
     print("\nAccess URLs:")
 
     def _print_access(kind: str, url: str) -> None:
-        print(f"    - {kind:<8} {url}")
+        suffix = f"/{token}/" if token is not None else ""
+        print(f"    - {kind:<8} {url}{suffix}")
 
     for host, port in bound:
         if host in ("", "0.0.0.0"):
@@ -3162,7 +3187,7 @@ def run_server(
             server.server_close()
 
 
-def _run_selftest() -> int:
+def _run_selftest(private_mode: bool = False) -> int:
     """Bind an ephemeral port, fetch the page, and report the result.
 
     A plain syntax check cannot catch a stdlib module that a newer Python has
@@ -3172,10 +3197,13 @@ def _run_selftest() -> int:
     import urllib.request
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), SimpleUploadServer)
+    token = secrets.token_urlsafe(24) if private_mode else None
+    httpd.token = token.encode("ascii") if token is not None else None
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
-        url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+        suffix = f"/{token}/" if token is not None else "/"
+        url = f"http://127.0.0.1:{httpd.server_address[1]}{suffix}"
         with urllib.request.urlopen(url, timeout=10) as response:
             status = response.status
             body = response.read()
@@ -3205,7 +3233,7 @@ def _run_selftest() -> int:
     print(
         _c(
             f"selftest OK on Python {platform.python_version()} "
-            f"({len(body)} bytes served)",
+            f"({len(body)} bytes served{'; private link checked' if private_mode else ''})",
             _ANSI_GREEN,
         ),
         flush=True,
@@ -3216,6 +3244,11 @@ def _run_selftest() -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Local upload server (streaming, queue-based, LAN-first)."
+    )
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        help="Optional secret link for access; HTTP remains unencrypted.",
     )
     parser.add_argument(
         "--selftest",
@@ -3284,7 +3317,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     if args.selftest:
-        raise SystemExit(_run_selftest())
+        raise SystemExit(_run_selftest(private_mode=args.private))
     try:
         endpoints = _build_bind_endpoints(args.host, args.port, args.listen)
     except ValueError as exc:
@@ -3301,4 +3334,5 @@ if __name__ == "__main__":
         retry_count=args.retry_count,
         retry_delay_ms=args.retry_delay_ms,
         upload_timeout_sec=args.upload_timeout_sec,
+        private_mode=args.private,
     )

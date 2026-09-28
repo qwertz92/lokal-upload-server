@@ -108,13 +108,83 @@ class AndroidServerTest(unittest.TestCase):
     def upload(self, path, body, policy="overwrite"):
         query = urlencode({"upload_id": "android-upload", "path": path,
                            "on_exists": policy})
-        return self.request("POST", f"/{self.token}/api/upload?{query}", body,
+        prefix = f"/{self.token}" if self.token is not None else ""
+        return self.request("POST", f"{prefix}/api/upload?{query}", body,
                             {"Content-Type": "application/octet-stream"})
 
     def preflight(self, items):
-        return self.request("POST", f"/{self.token}/api/preflight",
+        prefix = f"/{self.token}" if self.token is not None else ""
+        return self.request("POST", f"{prefix}/api/preflight",
                             json.dumps({"upload_id": "android-upload", "items": items}),
                             {"Content-Type": "application/json"})
+
+    def test_normal_mode_root_preflight_nested_upload_and_conflicts(self):
+        self.token = None
+        self.port = android_server.start(self.storage, self.token, 0)
+        status, html = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"fetch('api/preflight'", html)
+        rel = "normal/inner/data.bin"
+        payload = bytes(range(256)) * 17
+        status, body = self.preflight([{"path": rel, "size": len(payload)}])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["conflicts"], [])
+        status, body = self.upload(rel, payload)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["sha256"], hashlib.sha256(payload).hexdigest())
+        target = self.root / rel
+        self.assertEqual(target.read_bytes(), payload)
+        status, body = self.preflight([{"path": rel, "size": 11}])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["conflicts"][0]["reason"], "exists")
+        status, _ = self.upload(rel, b"skip", "skip")
+        self.assertEqual(status, 409)
+        self.assertEqual(target.read_bytes(), payload)
+        status, _ = self.upload(rel, b"replacement", "overwrite")
+        self.assertEqual(status, 200)
+        self.assertEqual(target.read_bytes(), b"replacement")
+
+    def test_switching_normal_and_private_modes_changes_accepted_routes(self):
+        private_token = self.token
+        self.token = None
+        self.port = android_server.start(self.storage, None, 0)
+        status, _ = self.upload("normal.bin", b"normal")
+        self.assertEqual(status, 200)
+        self.token = private_token
+        self.port = android_server.start(self.storage, private_token, 0)
+        for method, path in (("GET", "/"), ("POST", "/api/preflight"),
+                             ("POST", "/api/upload?upload_id=test-private&path=blocked.bin")):
+            status, _ = self.request(method, path, b"blocked" if method == "POST" else None)
+            self.assertEqual(status, 404, (method, path))
+        status, _ = self.request("GET", f"/{private_token}/")
+        self.assertEqual(status, 200)
+        status, _ = self.upload("private.bin", b"private")
+        self.assertEqual(status, 200)
+        self.token = None
+        self.port = android_server.start(self.storage, None, 0)
+        for method, path in (("GET", f"/{private_token}/"),
+                             ("POST", f"/{private_token}/api/upload?upload_id=test-normal&path=blocked.bin")):
+            status, _ = self.request(method, path, b"blocked" if method == "POST" else None)
+            self.assertEqual(status, 404, (method, path))
+        status, _ = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        status, _ = self.upload("after-switch.bin", b"normal again")
+        self.assertEqual(status, 200)
+        self.assertEqual((self.root / "after-switch.bin").read_bytes(), b"normal again")
+        self.assertFalse((self.root / "blocked.bin").exists())
+
+    def test_invalid_tokens_fail_closed_and_leave_private_server_running(self):
+        running = android_server._server
+        for token in ("", "with/slash", "bad?token", "é", "x" * 129, 123, b"token", False):
+            with self.subTest(token=token):
+                with self.assertRaises(ValueError):
+                    android_server.start(self.storage, token, 0)
+                self.assertIs(android_server._server, running)
+                status, _ = self.request("GET", "/")
+                self.assertEqual(status, 404)
+        status, _ = self.request("GET", f"/{self.token}/")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.storage.validation_count, 1)
 
     def test_capability_required_before_every_get_and_post(self):
         output = io.StringIO()

@@ -1,13 +1,11 @@
 """Android entry point; the browser UI and upload flow live in upload_server."""
 
-import hmac
 import os
 import re
 import socket
 import sys
 import threading
 import time
-from urllib.parse import urlparse
 
 import upload_server
 
@@ -87,27 +85,6 @@ class _Handler(upload_server.SimpleUploadServer):
         elif message.startswith("Upload error:"):
             print("Android upload failed", file=sys.stderr, flush=True)
 
-    def _authorize(self):
-        parsed = urlparse(self.path)
-        segment, separator, tail = parsed.path.removeprefix("/").partition("/")
-        if not separator or not hmac.compare_digest(
-            segment.encode("utf-8"), self.server.token
-        ):
-            self.close_connection = True
-            self._send_json(404, {"ok": False, "error": "not_found"})
-            return False
-        self.path = "/" + tail + ("?" + parsed.query if parsed.query else "")
-        return True
-
-    def do_GET(self):
-        if self._authorize():
-            super().do_GET()
-
-    def do_POST(self):
-        if self._authorize():
-            super().do_POST()
-
-
 class _AndroidHTTPServer(upload_server._UploadHTTPServer):
     daemon_threads = True
     block_on_close = False
@@ -115,7 +92,7 @@ class _AndroidHTTPServer(upload_server._UploadHTTPServer):
     def __init__(self, address, storage, token):
         self.storage = storage
         self.state = upload_server._ServerState()
-        self.token = token.encode("ascii")
+        self.token = token.encode("ascii") if token is not None else None
         self._slots = threading.BoundedSemaphore(8)
         self._clients = set()
         self._clients_changed = threading.Condition()
@@ -183,7 +160,9 @@ def _stop_locked():
 def start(storage, token, port):
     """Validate the chosen SAF tree and listen on all LAN interfaces."""
     global _server, _thread
-    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
+    if token is not None and (
+        not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token)
+    ):
         raise ValueError("Invalid URL token")
     with _lifecycle_lock:
         _stop_locked()

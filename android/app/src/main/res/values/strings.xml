@@ -7,6 +7,8 @@
     <string name="choose_folder">Choose folder</string>
     <string name="open_folder">Open folder</string>
     <string name="server_heading">Server</string>
+    <string name="privacy_mode">Privacy mode</string>
+    <string name="privacy_help">Off: IP + port. On: secret link. Stop the server to change.</string>
     <string name="server_stopped">Stopped. Tap Start to accept uploads.</string>
     <string name="server_starting">Starting…</string>
     <string name="server_stopping">Stopping…</string>
@@ -21,7 +23,7 @@
     <string name="copy_address">Copy address</string>
     <string name="share_address">Share address</string>
     <string name="address_copied">Address copied</string>
-    <string name="trust_note">Use only a trusted local network. HTTP does not encrypt uploads or the address. Anyone with this address can access the selected folder while the server runs. Stop the server when finished; each start creates a new private address.</string>
+    <string name="trust_note">Use only a trusted local network. HTTP does not encrypt uploads or the address. In normal mode, other devices on this network can upload. Privacy mode requires the secret link, which changes each start. Stop the server when finished.</string>
     <string name="notification_channel">Local uploads</string>
     <string name="notification_running">Accepting local uploads. Tap to see the address.</string>
     <string name="notification_offline">Waiting for Wi-Fi or Ethernet.</string>

@@ -6,6 +6,8 @@
     <string name="choose_folder">Ordner wählen</string>
     <string name="open_folder">Ordner öffnen</string>
     <string name="server_heading">Server</string>
+    <string name="privacy_mode">Privatmodus</string>
+    <string name="privacy_help">Aus: IP + Port. An: geheimer Link. Zum Ändern den Server stoppen.</string>
     <string name="server_stopped">Gestoppt. Tippe auf Start, um Uploads anzunehmen.</string>
     <string name="server_starting">Startet…</string>
     <string name="server_stopping">Stoppt…</string>
@@ -20,7 +22,7 @@
     <string name="copy_address">Adresse kopieren</string>
     <string name="share_address">Adresse teilen</string>
     <string name="address_copied">Adresse kopiert</string>
-    <string name="trust_note">Nur in einem vertrauenswürdigen lokalen Netz verwenden. HTTP verschlüsselt weder Uploads noch die Adresse. Wer diese Adresse kennt, kann auf den gewählten Ordner zugreifen, solange der Server läuft. Stoppe ihn nach Gebrauch; jeder Start erzeugt eine neue private Adresse.</string>
+    <string name="trust_note">Nur in einem vertrauenswürdigen lokalen Netz verwenden. HTTP verschlüsselt weder Uploads noch die Adresse. Im Normalmodus können andere Geräte in diesem Netz hochladen. Der Privatmodus erfordert den geheimen Link, der sich bei jedem Start ändert. Stoppe den Server nach Gebrauch.</string>
     <string name="notification_channel">Lokale Uploads</string>
     <string name="notification_running">Nimmt lokale Uploads an. Tippen zeigt die Adresse.</string>
     <string name="notification_offline">Wartet auf WLAN oder Ethernet.</string>

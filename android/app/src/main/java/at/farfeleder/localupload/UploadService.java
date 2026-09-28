@@ -43,6 +43,7 @@ public final class UploadService extends Service {
     static final String ACTION_STOP = "at.farfeleder.localupload.STOP";
     static final String PREFERENCES = "upload";
     static final String FOLDER_KEY = "folder";
+    static final String PRIVACY_KEY = "privacy";
     static final int STOPPED = 0;
     static final int STARTING = 1;
     static final int RUNNING = 2;
@@ -166,9 +167,12 @@ public final class UploadService extends Service {
             fail(getString(R.string.network_permission_required));
             return;
         }
-        byte[] random = new byte[24];
-        new SecureRandom().nextBytes(random);
-        token = Base64.getUrlEncoder().withoutPadding().encodeToString(random);
+        token = null;
+        if (getSharedPreferences(PREFERENCES, MODE_PRIVATE).getBoolean(PRIVACY_KEY, false)) {
+            byte[] random = new byte[24];
+            new SecureRandom().nextBytes(random);
+            token = Base64.getUrlEncoder().withoutPadding().encodeToString(random);
+        }
         String runToken = token;
         publish(STARTING, null);
         try {
@@ -277,7 +281,7 @@ public final class UploadService extends Service {
     }
 
     private List<String> urls() {
-        if (snapshot.state != RUNNING || token == null) return Collections.emptyList();
+        if (snapshot.state != RUNNING) return Collections.emptyList();
         TreeSet<String> result = new TreeSet<>();
         for (LinkProperties properties : networks.values()) {
             for (LinkAddress link : properties.getLinkAddresses()) {
@@ -285,7 +289,8 @@ public final class UploadService extends Service {
                 if (address instanceof Inet4Address && !address.isLoopbackAddress()
                         && !address.isLinkLocalAddress() && !address.isAnyLocalAddress()
                         && !address.isMulticastAddress()) {
-                    result.add("http://" + address.getHostAddress() + ":" + port + "/" + token + "/");
+                    result.add("http://" + address.getHostAddress() + ":" + port + "/"
+                            + (token == null ? "" : token + "/"));
                 }
             }
         }

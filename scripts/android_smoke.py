@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the running Android server and verify its SAF files using ADB.
 
-Select --device-dir in the app first and pass its current complete capability URL.
+Select --device-dir in the app first and pass its current URL. Add --privacy-mode
+when the app requires the complete capability URL instead of plain IP:port.
 The script does not install, start, stop, or configure the app or ADB forwarding.
 """
 
@@ -25,11 +26,14 @@ class Smoke:
     def __init__(self, args):
         self.args = args
         self.url = urlsplit(args.base_url)
+        valid_path = (re.fullmatch(r"/[A-Za-z0-9_-]{1,128}/", self.url.path)
+                      if args.privacy_mode else self.url.path == "/")
         if (self.url.scheme != "http" or not self.url.hostname
                 or self.url.username or self.url.password or self.url.query
                 or self.url.fragment
-                or not re.fullmatch(r"/[A-Za-z0-9_-]{1,128}/", self.url.path)):
-            raise ValueError("--base-url must be the complete http://host:port/token/ URL")
+                or not valid_path):
+            expected = "http://host:port/token/" if args.privacy_mode else "http://host:port/"
+            raise ValueError("--base-url must be " + expected + " for the selected mode")
         root = PurePosixPath(args.device_dir)
         if not root.is_absolute() or ".." in root.parts or "\n" in args.device_dir:
             raise ValueError("--device-dir must be an absolute Android directory without '..'")
@@ -150,21 +154,25 @@ class Smoke:
         unauthorized = self.run + "/unauthorized.bin"
         self.files[unauthorized] = {}
         query = urlencode({"upload_id": self.run, "path": unauthorized, "on_exists": "skip"})
-        for base in ("/", "/wrong-" + secrets.token_hex(8) + "/"):
+        rejected_bases = ["/wrong-" + secrets.token_hex(8) + "/"]
+        if self.args.privacy_mode:
+            rejected_bases.append("/")
+        for base in rejected_bases:
             for method, suffix in (("GET", ""), ("POST", "api/preflight"),
                                    ("POST", "api/upload?" + query)):
                 status, _ = self.request(method, suffix, b"" if method == "POST" else None,
                                          base=base)
-                self.require(status == 404, f"Capability bypass: {method} {suffix} returned {status}")
+                self.require(status == 404, f"Rejected prefix accepted: {method} {suffix} returned {status}")
         self.files.pop(unauthorized)
-        self.passed("missing and wrong capability rejected on every endpoint")
+        self.passed("missing and wrong capability rejected on every endpoint" if self.args.privacy_mode
+                    else "unrecognized URL prefix rejected on every endpoint")
 
         status, body = self.request("GET")
         html = body.decode("utf-8")
         self.require(status == 200 and "<!doctype html>" in html.lower(), "Browser page did not load")
         self.require("fetch('api/preflight'" in html and "`api/upload?" in html
                      and not re.search(r"(?:fetch|open)\([^\n]*['\"`]/api/", html),
-                     "Browser JavaScript does not preserve the capability prefix")
+                     "Browser JavaScript does not use relative upload endpoints")
         self.require(not re.search(r"<(?:script|link|img)\b[^>]*(?:src|href)\s*=", html,
                                    re.IGNORECASE)
                      and not re.search(r"@import\b|url\(\s*['\"]?https?://", html, re.IGNORECASE),
@@ -263,7 +271,8 @@ class Smoke:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", required=True, help="Current complete http://host:port/token/ URL")
+    parser.add_argument("--base-url", required=True, help="Current http://host:port/ or private capability URL")
+    parser.add_argument("--privacy-mode", action="store_true", help="Require the token URL and verify unauthenticated endpoints are denied")
     parser.add_argument("--adb", default="adb", help="ADB executable; a Windows adb.exe path also works")
     parser.add_argument("--serial", default="emulator-5554")
     parser.add_argument("--device-dir", required=True, help="ADB path of the folder selected in the app")
@@ -280,7 +289,7 @@ def main():
     try:
         smoke = Smoke(args)
         result.update(serial=args.serial, device_dir=smoke.root, run_prefix=smoke.run,
-                      origin=f"http://{smoke.url.netloc}")
+                      origin=f"http://{smoke.url.netloc}", privacy_mode=args.privacy_mode)
         smoke.execute()
         result["passed"] = True
     except (AssertionError, ValueError, RuntimeError, OSError, http.client.HTTPException,
