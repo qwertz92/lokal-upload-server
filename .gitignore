@@ -39,3 +39,14 @@ ENV/
 # Operating System
 .DS_Store
 Thumbs.db
+
+# Android local tools, credentials and generated output
+.gradle/
+.local-tools/
+local.properties
+signing.properties
+*.jks
+*.keystore
+*.apk
+*.aab
+artifacts/
