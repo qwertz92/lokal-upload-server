@@ -1,5 +1,8 @@
 # Android development
 
+To install the already signed APK, use the [phone installation instructions](../README.md#android-app).
+Building and signing are only needed for development or a new release.
+
 The native Java app embeds CPython 3.14 through Chaquopy 17.0.0. Its Gradle copy
 task packages the repository's main Python server as `upload_server.py`; generated
 copies belong only in `app/build/`. The app supports Android 8 or newer (API 26),
@@ -32,14 +35,32 @@ APK is for development only; delivered APKs must use the release key.
 Keep a signing properties file outside this repository, containing:
 
 ```properties
-storeFile=/absolute/path/to/local-upload-server.jks
+storeFile=/absolute/path/to/local-upload-server.p12
 storePassword=your-existing-store-password
 keyAlias=your-existing-key-alias
 keyPassword=your-existing-key-password
 ```
 
-Use the existing project key. The release build fails if its signing properties
-are missing or incomplete; it never falls back to the debug key. On HomeBase:
+Use the existing app-specific PKCS#12 (`.p12`) project key. Do not generate a
+replacement when setting up another machine: Android rejects updates signed by
+a different key, and losing this key prevents updates to existing installations.
+The release build fails if its signing properties are missing or incomplete; it
+never falls back to the debug key. The public release certificate's SHA-256 is:
+
+```text
+65aa570406522f3ea7ca5920ee45c21392b58573a0597894b202c7f9ea373e5f
+```
+
+An off-machine backup has not been verified. Back up both the existing keystore
+and its password properties to a secure location outside the build machine.
+On another machine, restore both, update `storeFile` for the restored location,
+and compare the resulting APK's certificate fingerprint before publishing:
+
+```fish
+timeout 30 "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
+```
+
+The reported certificate SHA-256 must match the value above. On HomeBase:
 
 ```fish
 set -gx JAVA_HOME /usr/lib/jvm/java-21-openjdk

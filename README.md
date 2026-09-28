@@ -2,6 +2,14 @@
 
 A local Python upload server for LAN usage, with queue support, folder structure preservation, conflict handling, and progress tracking.
 
+**Android: [Download the signed Local Upload 0.1.0 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.0/LocalUpload-0.1.0.apk)**
+· [Installation steps](#android-app)
+· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.0/LocalUpload-0.1.0.apk.sha256)
+· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.0)
+
+The prebuilt APK is already signed and includes Python. Installing it needs no
+build tools or account.
+
 ## Desktop Dependency Model
 
 - No external dependencies
@@ -57,7 +65,9 @@ emulator) and runs the same upload server on your phone. Python is bundled in
 the APK: no terminal, Python installation, account or internet service is needed.
 The desktop scripts remain usable independently.
 
-1. Install the signed `LocalUpload-0.1.0.apk` on the phone. If Android blocks the
+1. [Download LocalUpload-0.1.0.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.0/LocalUpload-0.1.0.apk)
+   on the phone and open it to install. This prebuilt APK is already signed; you
+   do not need to build it or create an account. If Android blocks the
    installation, allow **Install unknown apps** for the browser or file manager
    opening this APK, install it, then disable that permission again.
 2. Open **Local Upload**. Select a local reception folder with **Choose folder**
