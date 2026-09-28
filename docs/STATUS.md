@@ -2,12 +2,11 @@
 
 Updated: 2026-09-28
 
-Local Upload 0.1.1 is built as a signed Android APK. Android and the desktop
+Local Upload 0.1.1 is published as a signed Android APK. Android and the desktop
 server default to plain IP/port access. Privacy mode is explicitly optional:
 Android has a persisted checkbox; the desktop CLI accepts `--private`. Both use
 the same HTTP authorization code. Python remains bundled in the Android APK.
-The latest published download is currently [0.1.0](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.0);
-0.1.1 publication is the remaining delivery step.
+Public download: [release 0.1.1](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.1).
 
 | Required outcome | Acceptance evidence | State |
 | --- | --- | --- |
@@ -22,7 +21,10 @@ The latest published download is currently [0.1.0](https://github.com/qwertz92/l
 | Release identity | Version 0.1.1/code 2, same certificate as 0.1.0, valid release signature and 16 KiB APK alignment | Passed |
 | Independent review | One bounded Luna review of this change; no unresolved P1/P2 findings | Passed |
 
-Local delivery artifact: `artifacts/LocalUpload-0.1.1.apk` (35,881,685 bytes).
+Delivery: [LocalUpload-0.1.1.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk)
+(35,881,685 bytes), also kept locally at `artifacts/LocalUpload-0.1.1.apk`.
+The anonymous public download is byte-identical to the tested and installed APK;
+its [checksum file](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk.sha256) was downloaded and verified too.
 SHA-256: `5f2ff229685d2742bbd0a8548c9b70b7b9ab104ff81bd298ea1155dfbcfd4547`.
 Build, device, browser and negative-control receipts are under `artifacts/v0.1.1/`;
 generated artifacts remain outside Git. The 36 native libraries are byte-identical

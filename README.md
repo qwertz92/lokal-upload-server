@@ -2,10 +2,10 @@
 
 A local Python upload server for LAN usage, with queue support, folder structure preservation, conflict handling, and progress tracking.
 
-**Android: [Download the signed Local Upload 0.1.0 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.0/LocalUpload-0.1.0.apk)**
+**Android: [Download the signed Local Upload 0.1.1 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk)**
 · [Installation steps](#android-app)
-· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.0/LocalUpload-0.1.0.apk.sha256)
-· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.0)
+· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk.sha256)
+· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.1)
 
 The prebuilt APK is already signed and includes Python. Installing it needs no
 build tools or account.
@@ -65,11 +65,11 @@ emulator) and runs the same upload server on your phone. Python is bundled in
 the APK: no terminal, Python installation, account or internet service is needed.
 The desktop scripts remain usable independently.
 
-Version 0.1.1 source defaults to a simple IP/port address and adds optional
-Privacy mode. The currently published 0.1.0 APK linked above still requires its
-secret URL suffix; 0.1.1 has not yet been published.
+Version 0.1.1 defaults to a simple IP/port address and adds optional Privacy mode.
+To update 0.1.0, open the new APK and choose **Update** without uninstalling; the
+existing folder selection is retained.
 
-1. [Download LocalUpload-0.1.0.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.0/LocalUpload-0.1.0.apk)
+1. [Download LocalUpload-0.1.1.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk)
    on the phone and open it to install. This prebuilt APK is already signed; you
    do not need to build it or create an account. If Android blocks the
    installation, allow **Install unknown apps** for the browser or file manager
@@ -82,16 +82,16 @@ secret URL suffix; 0.1.1 has not yet been published.
 3. Allow local-network access if Android asks. Allow notifications to keep the
    server's Stop action visible while another app is open.
 4. Connect the sender and phone to the same trusted Wi-Fi. Open the address shown
-   by the app in the sender's browser. In 0.1.1 normal mode, IP and port are enough,
+   by the app in the sender's browser. In normal mode, IP and port are enough,
    for example `http://192.168.1.42:8040/`. Use the complete link when Privacy mode
-   is enabled, or when running 0.1.0. Copy/share the address from the app or type
+   is enabled. Copy/share the address from the app or type
    the simple IP/port address. Add files or folders to the browser upload queue.
 5. Received files appear in your selected folder. Stop the server in the app or
    its notification when finished. After the one-time setup, opening the app from
    its icon starts it again.
 
 The foreground notification keeps the transfer visible while the app is in the
-background. In 0.1.1 normal mode, any device that can reach the phone's IP and port
+background. In normal mode, any device that can reach the phone's IP and port
 can upload into the chosen folder. Optional **Privacy mode** (German:
 **Privatmodus**) requires a secret link instead. To change it, stop the server,
 set the checkbox, and tap Start; changing the setting does not start a transfer.
