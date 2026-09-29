@@ -34,4 +34,11 @@
     <string name="close">Close</string>
     <string name="licenses">Open-source licenses</string>
     <string name="licenses_error">Could not open the bundled license notices.</string>
+    <string name="open_logs">Logs</string>
+    <string name="log_title">Activity log</string>
+    <string name="log_help">Last 200 events in this app session; cleared when the app process exits. HTTP requests show observed activity, not continuously connected clients.</string>
+    <string name="log_empty">No events yet.</string>
+    <string name="log_copy">Copy</string>
+    <string name="log_clear">Clear</string>
+    <string name="log_copied">Log copied</string>
 </resources>

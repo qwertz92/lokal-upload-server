@@ -17,7 +17,9 @@ if [[ ! -f "$check_platform" ]]; then
 fi
 timeout 30 javac -Xlint:all -Werror -classpath "$check_platform" -d "$check_dir" \
   app/src/main/java/at/farfeleder/localupload/RunState.java tests/RunStateCheck.java \
+  app/src/main/java/at/farfeleder/localupload/ActivityLog.java tests/ActivityLogCheck.java \
   app/src/main/java/at/farfeleder/localupload/SafStorage.java \
   app/src/test/java/at/farfeleder/localupload/SafStoragePathCheck.java
 timeout 30 java -ea -cp "$check_dir" at.farfeleder.localupload.RunStateCheck
+timeout 30 java -ea -cp "$check_dir" at.farfeleder.localupload.ActivityLogCheck
 timeout 30 java -ea -cp "$check_dir:$check_platform" at.farfeleder.localupload.SafStoragePathCheck

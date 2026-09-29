@@ -48,6 +48,11 @@
             <Button style="?android:attr/buttonBarButtonStyle" android:id="@+id/share" android:layout_width="0dp" android:layout_weight="1"
                 android:layout_height="wrap_content" android:minHeight="64dp" android:text="@string/share_address" />
         </LinearLayout>
+        <TextView android:id="@+id/activity_preview" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:lines="2" android:ellipsize="end"
+            android:textAppearance="?android:attr/textAppearanceSmall" />
+        <Button android:id="@+id/open_logs" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="56dp" android:text="@string/open_logs" />
         <CheckBox android:id="@+id/privacy" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="24dp" android:minHeight="48dp" android:text="@string/privacy_mode" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content"

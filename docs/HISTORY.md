@@ -1,5 +1,11 @@
 # History
 
+## 2026-09-29 — Android activity log
+
+Added a bounded in-app activity log with a live preview, copy/clear actions and no per-event notifications. Shared server events now distinguish a disconnected response after a successful commit from an aborted upload; a failing log callback cannot interrupt file storage.
+
+The first review/device round reproduced both a reader-position reset and failed bottom-following when log text changed. Scroll checks must compare a retained visible event, not an already-evicted oldest entry; stable control rectangles alone do not prove stable content. Further device checks showed that deferring refreshes during a drag was insufficient while the TextView retained native text selection. Removing that competing selection behavior fixed the unchanged drag/upload reproduction; the explicit Copy button still copies the full log.
+
 ## 2026-09-28 — Optional Privacy mode on Android and desktop
 
 Made plain IP/port access the Android default and added an explicit persisted Privacy checkbox; the desktop CLI gets the same optional protection through `--private` and a shared HTTP guard. An in-place 0.1.0-to-0.1.1 upgrade preserves the folder grant and changes the unauthenticated root from 404 to the upload page. Security options must not silently replace the requested simple LAN workflow; verified normal/private uploads, six negative controls and one review round cover this correction. Published `v0.1.1` with its signed APK and checksum; an anonymous download matched the tested bytes.

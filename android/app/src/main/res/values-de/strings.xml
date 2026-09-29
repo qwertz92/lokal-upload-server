@@ -33,4 +33,11 @@
     <string name="close">Schließen</string>
     <string name="licenses">Open-Source-Lizenzen</string>
     <string name="licenses_error">Die enthaltenen Lizenzhinweise konnten nicht geöffnet werden.</string>
+    <string name="open_logs">Protokoll öffnen</string>
+    <string name="log_title">Aktivitätsprotokoll</string>
+    <string name="log_help">Letzte 200 Ereignisse dieser App-Sitzung; beim Beenden des App-Prozesses gelöscht. HTTP-Anfragen zeigen beobachtete Aktivität, keine dauerhaft verbundenen Geräte.</string>
+    <string name="log_empty">Noch keine Ereignisse.</string>
+    <string name="log_copy">Kopieren</string>
+    <string name="log_clear">Leeren</string>
+    <string name="log_copied">Protokoll kopiert</string>
 </resources>

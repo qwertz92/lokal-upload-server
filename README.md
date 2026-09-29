@@ -2,10 +2,10 @@
 
 A local Python upload server for LAN usage, with queue support, folder structure preservation, conflict handling, and progress tracking.
 
-**Android: [Download the signed Local Upload 0.1.1 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk)**
+**Android: [Download the signed Local Upload 0.1.2 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.2/LocalUpload-0.1.2.apk)**
 · [Installation steps](#android-app)
-· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk.sha256)
-· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.1)
+· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.2/LocalUpload-0.1.2.apk.sha256)
+· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.2)
 
 The prebuilt APK is already signed and includes Python. Installing it needs no
 build tools or account.
@@ -65,11 +65,11 @@ emulator) and runs the same upload server on your phone. Python is bundled in
 the APK: no terminal, Python installation, account or internet service is needed.
 The desktop scripts remain usable independently.
 
-Version 0.1.1 defaults to a simple IP/port address and adds optional Privacy mode.
-To update 0.1.0, open the new APK and choose **Update** without uninstalling; the
-existing folder selection is retained.
+Version 0.1.2 adds live activity and an in-app log. Open the new APK and choose
+**Update** without uninstalling; the existing folder selection and Privacy mode
+setting are retained. Simple IP/port access remains the default.
 
-1. [Download LocalUpload-0.1.1.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.1/LocalUpload-0.1.1.apk)
+1. [Download LocalUpload-0.1.2.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.2/LocalUpload-0.1.2.apk)
    on the phone and open it to install. This prebuilt APK is already signed; you
    do not need to build it or create an account. If Android blocks the
    installation, allow **Install unknown apps** for the browser or file manager
@@ -89,6 +89,14 @@ existing folder selection is retained.
 5. Received files appear in your selected folder. Stop the server in the app or
    its notification when finished. After the one-time setup, opening the app from
    its icon starts it again.
+
+Open **Logs** (German: **Protokoll öffnen**) in the app to see client requests, upload
+starts, stored files, rejected requests and errors. **Copy** copies the log;
+**Clear** removes its entries. The last 200 entries are kept in memory during the
+app process: closing the log or stopping the server keeps them, but Android
+ending the app process clears them. Client activity means an observed HTTP
+request, not a persistent browser connection. Individual events do not generate
+notifications.
 
 The foreground notification keeps the transfer visible while the app is in the
 background. In normal mode, any device that can reach the phone's IP and port

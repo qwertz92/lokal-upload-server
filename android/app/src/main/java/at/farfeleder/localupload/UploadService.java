@@ -94,6 +94,7 @@ public final class UploadService extends Service {
     private boolean destroyed;
     private boolean callbackRegistered;
     private String token;
+    private ActivityLog activityLog = new ActivityLog(null);
     private int port;
     private int lastStartId;
 
@@ -174,6 +175,10 @@ public final class UploadService extends Service {
             token = Base64.getUrlEncoder().withoutPadding().encodeToString(random);
         }
         String runToken = token;
+        ActivityLog previousLog = activityLog;
+        ActivityLog runLog = new ActivityLog(runToken);
+        activityLog = runLog;
+        runLog.log("Server starting (" + (runToken == null ? "normal mode" : "privacy mode") + ")");
         publish(STARTING, null);
         try {
             if (Build.VERSION.SDK_INT >= 29) {
@@ -194,10 +199,11 @@ public final class UploadService extends Service {
             try {
                 if (!Python.isStarted()) Python.start(new AndroidPlatform(getApplicationContext()));
                 Python.getInstance().getModule("android_server").callAttr("stop");
+                previousLog.close();
                 SafStorage storage = new SafStorage(getApplicationContext(), tree);
                 storage.validate();
                 actualPort = Python.getInstance().getModule("android_server")
-                        .callAttr("start", storage, runToken, 8040).toInt();
+                        .callAttr("start", storage, runToken, 8040, runLog).toInt();
                 if (actualPort < 1 || actualPort > 65535) {
                     throw new IllegalStateException("The server returned an invalid port");
                 }
@@ -205,6 +211,8 @@ public final class UploadService extends Service {
                 error = message(failure, runToken);
                 String cleanupError = stopPython(runToken);
                 if (cleanupError != null) error += "\n" + cleanupError;
+            } finally {
+                previousLog.close();
             }
             int resultPort = actualPort;
             String resultError = error;
@@ -214,6 +222,7 @@ public final class UploadService extends Service {
                     fail(resultError);
                 } else {
                     port = resultPort;
+                    runLog.log("Server running on port " + resultPort);
                     publish(RUNNING, null);
                     updateNotification();
                 }
@@ -224,10 +233,14 @@ public final class UploadService extends Service {
     private void stopServer() {
         long command = commands.stop();
         String runToken = token;
+        ActivityLog runLog = activityLog;
+        runLog.log("Server stopping");
         token = null;
         publish(STOPPING, null);
         PYTHON.execute(() -> {
             String error = stopPython(runToken);
+            runLog.log(error == null ? "Server stopped" : "Stop error: " + error);
+            runLog.close();
             main.post(() -> {
                 if (!current(command)) return;
                 releaseWakeLock();
@@ -252,6 +265,8 @@ public final class UploadService extends Service {
     }
 
     private void fail(String error) {
+        activityLog.log("Server error: " + error);
+        activityLog.close();
         commands.stop();
         token = null;
         releaseWakeLock();
@@ -346,10 +361,14 @@ public final class UploadService extends Service {
         destroyed = true;
         commands.stop();
         String runToken = token;
+        ActivityLog runLog = activityLog;
         token = null;
         if (callbackRegistered) connectivity.unregisterNetworkCallback(networkCallback);
         releaseWakeLock();
-        PYTHON.execute(() -> stopPython(runToken));
+        PYTHON.execute(() -> {
+            stopPython(runToken);
+            runLog.close();
+        });
         if (owner == this) {
             if (snapshot.state != ERROR) publish(STOPPED, null);
             owner = null;

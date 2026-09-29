@@ -13,6 +13,8 @@ import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PersistableBundle;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
@@ -31,6 +33,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class MainActivity extends Activity {
     private static final int PICK_FOLDER = 1;
@@ -38,6 +41,7 @@ public final class MainActivity extends Activity {
     private TextView folder;
     private TextView status;
     private TextView address;
+    private TextView activityPreview;
     private Button choose;
     private Button open;
     private Button start;
@@ -47,6 +51,16 @@ public final class MainActivity extends Activity {
     private CheckBox privacy;
     private boolean pendingStart;
     private final Runnable update = this::render;
+    private final Handler logMain = new Handler(Looper.getMainLooper());
+    private final AtomicBoolean logPending = new AtomicBoolean();
+    private volatile boolean logVisible;
+    private final Runnable logRefresh = () -> {
+        logPending.set(false);
+        if (logVisible) renderLog();
+    };
+    private final Runnable logChanged = () -> {
+        if (logVisible && logPending.compareAndSet(false, true)) logMain.postDelayed(logRefresh, 100);
+    };
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -54,6 +68,7 @@ public final class MainActivity extends Activity {
         folder = findViewById(R.id.folder);
         status = findViewById(R.id.status);
         address = findViewById(R.id.address);
+        activityPreview = findViewById(R.id.activity_preview);
         choose = findViewById(R.id.choose_folder);
         open = findViewById(R.id.open_folder);
         start = findViewById(R.id.start);
@@ -75,6 +90,7 @@ public final class MainActivity extends Activity {
                 new Intent(this, UploadService.class).setAction(UploadService.ACTION_STOP)));
         copy.setOnClickListener(view -> copyAddress());
         share.setOnClickListener(view -> shareAddress());
+        findViewById(R.id.open_logs).setOnClickListener(view -> startActivity(new Intent(this, LogActivity.class)));
         findViewById(R.id.licenses).setOnClickListener(view -> showLicenses());
         if (Build.VERSION.SDK_INT >= 28) {
             for (int heading : new int[] {R.id.title, R.id.folder_heading, R.id.server_heading, R.id.address_heading}) {
@@ -123,11 +139,18 @@ public final class MainActivity extends Activity {
     @Override public void onStart() {
         super.onStart();
         UploadService.addListener(update);
+        logVisible = true;
+        ActivityLog.addListener(logChanged);
+        renderLog();
         render();
     }
 
     @Override public void onStop() {
         UploadService.removeListener(update);
+        logVisible = false;
+        ActivityLog.removeListener(logChanged);
+        logMain.removeCallbacks(logRefresh);
+        logPending.set(false);
         super.onStop();
     }
 
@@ -142,6 +165,11 @@ public final class MainActivity extends Activity {
 
     private String tree() {
         return preferences().getString(UploadService.FOLDER_KEY, null);
+    }
+
+    private void renderLog() {
+        String latest = ActivityLog.latest();
+        activityPreview.setText(latest == null ? getString(R.string.log_empty) : latest);
     }
 
     private void render() {
@@ -250,6 +278,7 @@ public final class MainActivity extends Activity {
         pendingStart = false;
         if (Build.VERSION.SDK_INT >= 37 && checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK)
                 != PackageManager.PERMISSION_GRANTED) {
+            new ActivityLog(null).log("Local network permission denied");
             new AlertDialog.Builder(this)
                     .setMessage(R.string.network_permission_required)
                     .setPositiveButton(R.string.open_settings, (dialog, which) -> startActivity(
@@ -294,6 +323,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showError(String error) {
+        new ActivityLog(null).log("App error: " + error);
         status.setText(getString(R.string.server_error, error));
     }
 

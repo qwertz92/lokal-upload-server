@@ -13,7 +13,7 @@ ARM64 phones and x86-64 emulators, and targets Android 17 (API 37).
 Install JDK 17 or newer, Python 3.14, and Android SDK platform 37 plus build tools
 37.0.0. Point `ANDROID_HOME` at the SDK, or put `sdk.dir=/absolute/sdk/path` in
 ignored `local.properties`. Gradle 9.8.0 is downloaded by the checksum-verified
-wrapper. AGP 9.4.1 is the newest stable release checked on 2026-09-28 and has built
+wrapper. AGP 9.4.1 is the newest stable release checked on 2026-09-29 and has built
 the signed APK successfully. Chaquopy documents compatibility through AGP 9.2;
 the newer version is selected based on this project's measured build result.
 
@@ -25,7 +25,8 @@ timeout 1200 ./gradlew --no-daemon --warning-mode all lintDebug assembleDebug
 ```
 
 The standalone Java checks reject stale start/stop callbacks, duplicate start
-commands, and unsafe SAF paths. `check.sh` compiles and runs their `main` methods
+commands, unsafe SAF paths, and log-buffer bounds, sanitization, redaction and
+concurrency. `check.sh` compiles and runs their `main` methods
 with assertions enabled; Gradle's test task does not run these checks. Android lint
 and Java compiler warnings fail the build. A debug
 APK is for development only; delivered APKs must use the release key.
@@ -92,10 +93,17 @@ Gradle 10 until its plugin has migrated these APIs. No app lint baseline is used
 
 `UploadService` serializes every Python operation on one process-wide executor:
 
-- `android_server.start(SafStorage, token, 8040)` returns the actual listening port;
+- `android_server.start(SafStorage, token, 8040, logSink)` returns the actual listening port;
   Java `null` / Python `None` selects normal mode, a nonempty token selects Privacy mode.
 - `android_server.stop()` closes the listener and finishes active requests.
 - `SafStorage(Context, persistedTreeUri).validate()` checks the selected folder.
+
+The optional fourth argument is a per-run Java sink exposing `log(String)`.
+HTTP worker threads send events to a bounded in-memory log (200 entries, up to
+1024 message characters each); foreground UI listeners coalesce updates. The
+capability and URLs are redacted before display/copy. Log callbacks must never
+change an HTTP response or interrupt storage work. Logs survive server stop and
+activity recreation, but not app-process termination; there is no disk log.
 
 The service enters the foreground before initializing Python, acquires a timed
 CPU wake lock renewed while active, and cleans up on explicit stop or destruction.
@@ -160,3 +168,16 @@ instrumentation result must contain `failures=0`; `adb`'s exit status alone does
 not indicate test success. The runner creates disposable subfolders in the
 persisted tree and exercises the installed app's recovery code. It does not
 simulate hardware power-loss durability or replace physical-device testing.
+
+For the activity-log UI, first upgrade the previous signed APK in place and check
+that its folder grant and Privacy mode setting survive. With **Logs** open, verify
+request, upload success, rejection and abort events, then background/reopen the
+activity and stop the server: existing entries must remain. Copy must match the
+log, Clear must empty it, and individual events must not post notifications.
+
+Fill the log past 200 entries using actual requests. Without touching the view,
+it must follow the newest event. Scroll to a middle event that will remain in the
+buffer, append a few more events, and compare that same visible event and its
+vertical position before/after. Repeat while dragging. Comparing only the fixed
+button bounds or an oldest event that was legitimately evicted misses the scroll
+regression. Check German/light/dark and large text with the final signed APK.
