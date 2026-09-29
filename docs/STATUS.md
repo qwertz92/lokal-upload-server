@@ -9,9 +9,12 @@ HTTP requests represent observed activity, not continuously connected clients.
 Individual log events do not generate notifications. Normal mode still uses a
 plain IP/port URL; Privacy mode remains optional on Android and desktop.
 
-Release candidate: `artifacts/LocalUpload-0.1.2.apk`, 35,883,789 bytes.
+Published: [release 0.1.2](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.1.2).
+Download: [LocalUpload-0.1.2.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.2/LocalUpload-0.1.2.apk),
+35,883,789 bytes; also retained at `artifacts/LocalUpload-0.1.2.apk`.
 SHA-256: `56a4bb38778ce497af1c635e855518406b74b39a905520c6b8dcf243be720c26`.
-Local acceptance is complete; public delivery is being verified separately.
+The anonymous public APK and its [checksum file](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.1.2/LocalUpload-0.1.2.apk.sha256)
+were downloaded and match the tested artifacts byte-for-byte.
 
 | Required outcome | Acceptance evidence | State |
 | --- | --- | --- |
@@ -25,6 +28,7 @@ Local acceptance is complete; public delivery is being verified separately.
 | Log actions and lifecycle | Actual Copy/paste, empty-state Clear, background return and token-free log text | Passed |
 | Background transfer and interface | Exact 4 MiB screen-off upload; German light/dark at 1.3 font scale with stable controls | Passed |
 | Browser interaction | Windows Chrome upload/conflict/overwrite, exact device hashes and no JavaScript errors | Passed |
+| Explicit Stop and test cleanup | HTTP connection refused after Stop; selected test folder empty, forwarding removed and owned emulator closed | Passed |
 | Release identity | Version 0.1.2/code 3, original release certificate, valid signature and 16 KiB APK alignment | Passed |
 | Independent review | Four bounded review rounds; device-reproduced scroll findings fixed, no demonstrated P1/P2 left in the final reviewed code | Passed |
 

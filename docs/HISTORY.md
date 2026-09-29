@@ -2,7 +2,7 @@
 
 ## 2026-09-29 — Android activity log
 
-Added a bounded in-app activity log with a live preview, copy/clear actions and no per-event notifications. Shared server events now distinguish a disconnected response after a successful commit from an aborted upload; a failing log callback cannot interrupt file storage.
+Published `v0.1.2` with its original-key signed APK and checksum; anonymous public downloads match the tested bytes. Added a bounded in-app activity log with a live preview, copy/clear actions and no per-event notifications. Shared server events now distinguish a disconnected response after a successful commit from an aborted upload; a failing log callback cannot interrupt file storage.
 
 The first review/device round reproduced both a reader-position reset and failed bottom-following when log text changed. Scroll checks must compare a retained visible event, not an already-evicted oldest entry; stable control rectangles alone do not prove stable content. Further device checks showed that deferring refreshes during a drag was insufficient while the TextView retained native text selection. Removing that competing selection behavior fixed the unchanged drag/upload reproduction; the explicit Copy button still copies the full log.
 
