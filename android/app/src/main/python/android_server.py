@@ -75,11 +75,28 @@ class _SafStorage:
         self._call("abort", ticket)
 
 
+def _safe_log(message, token):
+    if token is not None:
+        message = message.replace(token.decode("ascii"), "[hidden]")
+    if message.startswith(("New client:", "Upload started:")):
+        message = message.partition(" ua=")[0]
+    if "invalid literal for int() with base 10:" in message:
+        message = message.partition("invalid literal for int() with base 10:")[0] + "invalid numeric parameter"
+    message = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", "[hidden URI]", message)
+    message = "".join(char if char.isprintable() else " " for char in message)
+    return message[:1024]
+
+
 class _Handler(upload_server.SimpleUploadServer):
     timeout = 30
 
     def _log(self, message, *, color=None):
         # Capability URLs never belong in Android's process logs.
+        if self.server.log_sink is not None:
+            try:
+                self.server.log_sink.log(_safe_log(message, self.server.token))
+            except Exception:
+                print("Android activity log callback failed", file=sys.stderr, flush=True)
         if message.startswith("Temporary upload cleanup failed:"):
             print("Android temporary upload cleanup failed", file=sys.stderr, flush=True)
         elif message.startswith("Upload error:"):
@@ -89,10 +106,11 @@ class _AndroidHTTPServer(upload_server._UploadHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, address, storage, token):
+    def __init__(self, address, storage, token, log_sink=None):
         self.storage = storage
         self.state = upload_server._ServerState()
         self.token = token.encode("ascii") if token is not None else None
+        self.log_sink = log_sink
         self._slots = threading.BoundedSemaphore(8)
         self._clients = set()
         self._clients_changed = threading.Condition()
@@ -157,7 +175,7 @@ def _stop_locked():
     _thread = None
 
 
-def start(storage, token, port):
+def start(storage, token, port, log_sink=None):
     """Validate the chosen SAF tree and listen on all LAN interfaces."""
     global _server, _thread
     if token is not None and (
@@ -168,7 +186,7 @@ def start(storage, token, port):
         _stop_locked()
         adapter = _SafStorage(storage)
         adapter.initialize()
-        httpd = _AndroidHTTPServer(("0.0.0.0", int(port)), adapter, token)
+        httpd = _AndroidHTTPServer(("0.0.0.0", int(port)), adapter, token, log_sink)
         thread = threading.Thread(
             target=httpd.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
         )

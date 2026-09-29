@@ -37,6 +37,7 @@ class FakeSafStorage:
         self.aborted = threading.Event()
         self.started = threading.Event()
         self.fail_commit = False
+        self.commit_error = "provider refused target path"
         self.commit_digests = []
         self.fail_open = False
         self.available_bytes = -1
@@ -68,7 +69,7 @@ class FakeSafStorage:
 
     def commit(self, ticket, rel, overwrite, digest):
         if self.fail_commit:
-            raise ValueError("provider refused target path")
+            raise ValueError(self.commit_error)
         target = self.root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and not overwrite:
@@ -81,6 +82,14 @@ class FakeSafStorage:
         Path(ticket).unlink(missing_ok=True)
         self.tickets.discard(ticket)
         self.aborted.set()
+
+
+class RecordingLog:
+    def __init__(self):
+        self.messages = []
+
+    def log(self, message):
+        self.messages.append(message)
 
 
 class AndroidServerTest(unittest.TestCase):
@@ -357,6 +366,131 @@ class AndroidServerTest(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             thread.join(2)
+
+    def test_committed_file_response_disconnect_is_not_an_upload_abort(self):
+        messages = []
+
+        class ResponseFailureHandler(android_server._Handler):
+            def _log(self, message, *, color=None):
+                messages.append(message)
+
+            def _send_json(self, status, payload):
+                if status == 200 and "sha256" in payload:
+                    raise BrokenPipeError("response connection closed")
+                super()._send_json(status, payload)
+
+        android_server._server.RequestHandlerClass = ResponseFailureHandler
+        with self.assertRaises(http.client.RemoteDisconnected):
+            self.upload("stored.bin", b"stored before reply")
+        self.assertEqual((self.root / "stored.bin").read_bytes(), b"stored before reply")
+        self.assertTrue(any(message.startswith("DONE ") for message in messages))
+        self.assertFalse(any(message.startswith("Upload aborted:") for message in messages))
+        self.assertTrue(any(message.startswith("Upload response disconnected:") for message in messages))
+
+    def test_log_sink_reports_safe_requests_and_upload_outcomes(self):
+        sink = RecordingLog()
+        self.port = android_server.start(self.storage, self.token, 0, sink)
+        status, _ = self.request(
+            "GET", f"/{self.token}/?privateQuery=privatePayload",
+            headers={"User-Agent": f"Browser https://secret/{self.token}/?privatePayload"},
+        )
+        self.assertEqual(status, 200)
+        payload = bytes(range(256)) * 17
+        status, _ = self.upload("nested/keep.bin", payload)
+        self.assertEqual(status, 200)
+        status, _ = self.upload("nested/keep.bin", b"skip", "skip")
+        self.assertEqual(status, 409)
+        self.storage.fail_commit = True
+        self.storage.commit_error = f"provider refused content://private/document?secret={self.token}"
+        status, _ = self.upload("nested/keep.bin", b"failed")
+        self.assertEqual(status, 400)
+        self.assertEqual((self.root / "nested/keep.bin").read_bytes(), payload)
+        self.storage.available_bytes = 1
+        status, _ = self.preflight([{"path": "too-big.bin", "size": 20}])
+        self.assertEqual(status, 400)
+        status, _ = self.request("GET", f"/{self.token}/unknown?privateQuery=privatePayload")
+        self.assertEqual(status, 404)
+        self.assertEqual(sum(" method=" in message for message in sink.messages), 6)
+        joined = "\n".join(sink.messages)
+        for expected in ("method=GET route=page", "route=other", "START ", "DONE ",
+                         "Upload rejected:", "status=409", "Upload error:", "Preflight error:"):
+            self.assertIn(expected, joined)
+        for secret in (self.token, "privatePayload", "privateQuery", "content://", "https://", "private/document"):
+            self.assertNotIn(secret, joined)
+
+    def test_stop_delivers_abort_log_and_preserves_original(self):
+        sink = RecordingLog()
+        self.port = android_server.start(self.storage, self.token, 0, sink)
+        (self.root / "keep.bin").write_bytes(b"original")
+        holder = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            holder.sendall((f"POST /{self.token}/api/upload?upload_id=logged-abort"
+                            "&path=keep.bin&on_exists=overwrite HTTP/1.1\r\n"
+                            "Host: test\r\nContent-Length: 1000000\r\n\r\n").encode() + b"partial")
+            self.assertTrue(self.storage.started.wait(3))
+            android_server.stop()
+            self.assertTrue(any(message.startswith("Upload aborted:") for message in sink.messages))
+            self.assertEqual((self.root / "keep.bin").read_bytes(), b"original")
+        finally:
+            holder.close()
+
+    def test_failing_log_sink_does_not_change_exact_uploaded_bytes(self):
+        class FailingLog:
+            attempts = 0
+
+            def log(self, message):
+                self.attempts += 1
+                raise RuntimeError("log display failed")
+
+        sink = FailingLog()
+        self.token = None
+        self.port = android_server.start(self.storage, self.token, 0, sink)
+        payload = bytes(range(256)) * 33
+        status, body = self.upload("callback-failure.bin", payload)
+        self.assertEqual(status, 200, body)
+        self.assertGreater(sink.attempts, 0)
+        self.assertEqual((self.root / "callback-failure.bin").read_bytes(), payload)
+        self.assertEqual(json.loads(body)["sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_log_sink_reports_busy_and_reserved_rejections(self):
+        sink = RecordingLog()
+        self.port = android_server.start(self.storage, self.token, 0, sink)
+        state = android_server._server.state
+        self.assertTrue(state.reserve_path("reserved.bin", "another-job"))
+        try:
+            status, _ = self.upload("reserved.bin", b"reserved")
+            self.assertEqual(status, 409)
+        finally:
+            state.release_path("reserved.bin", "another-job")
+        self.assertTrue(any("status=409 reason=in_progress" in message for message in sink.messages))
+        holder = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            holder.sendall((f"POST /{self.token}/api/upload?upload_id=logged-busy"
+                            "&path=held.bin&on_exists=overwrite HTTP/1.1\r\n"
+                            "Host: test\r\nContent-Length: 1000000\r\n\r\n").encode() + b"partial")
+            self.assertTrue(self.storage.started.wait(3))
+            status, _ = self.upload("busy.bin", b"busy")
+            self.assertEqual(status, 429)
+            self.assertTrue(any("status=429 reason=busy" in message for message in sink.messages))
+        finally:
+            holder.close()
+            android_server.stop()
+
+    def test_log_redaction_removes_uri_controls_and_secret_before_truncation(self):
+        token = self.token.encode("ascii")
+        cases = (
+            (f"provider content://authority/document/abc?key={self.token}", "provider [hidden URI]"),
+            ("provider CONTENT://authority/document/abc", "provider [hidden URI]"),
+            (f"page https://host/{self.token}/?private=data", "page [hidden URI]"),
+            ("New client: ip=127.0.0.1 ua=sensitive-browser", "New client: ip=127.0.0.1"),
+            ("START path=file ua=value", "START path=file ua=value"),
+            ("a\r\nb\x00c", "a  b c"),
+            ("Upload error: err=invalid literal for int() with base 10: 'privatePayload'", "Upload error: err=invalid numeric parameter"),
+            ("x" * 1020 + self.token, "x" * 1020 + "[hid"),
+        )
+        for message, expected in cases:
+            with self.subTest(message=message[:60]):
+                self.assertEqual(android_server._safe_log(message, token), expected)
 
 
 if __name__ == "__main__":

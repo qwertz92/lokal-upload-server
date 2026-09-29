@@ -427,11 +427,15 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
     def _note_client_if_new(self) -> None:
         ip = self._client_ip()
         ua = self.headers.get("User-Agent")
-        if self.state.note_client(ip):
-            details = f"New client: ip={ip}"
-            if ua:
-                details += f" ua={ua}"
-            self._log(details, color=_ANSI_GREEN)
+        is_new = self.state.note_client(ip)
+        route = {"/": "page", "/api/preflight": "preflight", "/api/upload": "upload"}.get(
+            urlparse(self.path).path, "other"
+        )
+        label = "New client" if is_new else "Client request"
+        details = f"{label}: ip={ip} method={self.command} route={route}"
+        if is_new and ua:
+            details += f" ua={ua}"
+        self._log(details, color=_ANSI_GREEN if is_new else None)
 
     def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -628,6 +632,10 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             )
         except Exception as e:
             status = e.status if isinstance(e, _RequestError) else 400
+            self._log(
+                f"Preflight error: ip={self._client_ip()} status={status} err={e}",
+                color=_ANSI_RED,
+            )
             self._discard_request_body()
             self._send_json(status, {"ok": False, "error": str(e)})
 
@@ -635,6 +643,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         ip = self._client_ip()
         sem = self.state.get_ip_semaphore(ip)
         if not sem.acquire(blocking=False):
+            self._log(f"Upload rejected: ip={ip} status=429 reason=busy", color=_ANSI_YELLOW)
             self._discard_request_body()
             self._send_json(
                 429, {"ok": False, "error": "Upload already active (use queue)"}
@@ -642,6 +651,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             return
 
         ticket = None
+        committed = False
         path_reserved = False
         upload_id = ""
         rel_path = ""
@@ -686,6 +696,10 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 self.state.mark_started_logged(upload_id)
 
             if not self.state.reserve_path(rel_path, upload_id):
+                self._log(
+                    f"Upload rejected: id={upload_id} ip={ip} path={rel_path} status=409 reason=in_progress",
+                    color=_ANSI_YELLOW,
+                )
                 self._discard_request_body()
                 self._send_json(
                     409,
@@ -698,6 +712,10 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 raise ValueError("target path is a directory")
 
             if self.storage.exists(rel_path) and on_exists == "skip":
+                self._log(
+                    f"Upload rejected: id={upload_id} ip={ip} path={rel_path} status=409 reason=exists",
+                    color=_ANSI_YELLOW,
+                )
                 self._discard_request_body()
                 self._send_json(
                     409,
@@ -727,6 +745,7 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
 
             digest = hasher.hexdigest()
             self.storage.commit(ticket, rel_path, on_exists == "overwrite", digest)
+            committed = True
             ticket = None
 
             done_files, total_files, total_bytes = self.state.bump_done(
@@ -758,8 +777,9 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
             # socket.timeout means the client stopped sending without closing
             # the connection. That is an abandoned upload, not a server fault.
             reason = str(e) or "Client disconnected"
+            label = "Upload response disconnected" if committed else "Upload aborted"
             self._log(
-                f"Upload aborted: id={upload_id or '?'} ip={ip} path={rel_path or '?'} reason={reason}",
+                f"{label}: id={upload_id or '?'} ip={ip} path={rel_path or '?'} reason={reason}",
                 color=_ANSI_YELLOW,
             )
         except Exception as e:
