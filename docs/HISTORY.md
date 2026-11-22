@@ -2,6 +2,8 @@
 
 ## 2026-11-22 — Stalled connections, a rebuilt page and Android 0.2.0
 
+Published `v0.2.0` with its original-key signed APK and checksum; the anonymous public download matches the tested bytes.
+
 Trigger: 36 files, 1.1 MB in total, sent from a managed Windows laptop to the Android app took 18 minutes and most of them failed. The app's log showed request headers arriving and the bodies not following. The server waited 30 s for each body while the browser gave up after 6 to 9 s, and the browser's own retries were answered `429 busy`, because the abandoned request still held that address's single upload slot. With two retries per file, a stall of a few seconds became a failed file. What stalled the connection (the phone's Wi-Fi power saving with the screen off, or the laptop's proxy client) cannot be decided from that log; the new log lines (`received=X of Y after Zs`, `attempt=N after=reason`) are there to decide it next time.
 
 Lessons:

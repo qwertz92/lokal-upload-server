@@ -9,10 +9,14 @@ additionally holds a Wi-Fi lock, keeps its screen on while the server runs
 (optional, on by default) and keeps 500 log entries. What triggered the work and
 what it taught: [history](HISTORY.md).
 
-Built and verified: `artifacts/LocalUpload-0.2.0.apk`, 35,900,709 bytes,
-SHA-256 `84c4614010f1b9811fb0be97d29d48abe7d8490f0db18322b76ba02e0c757b87`,
+Published: [release 0.2.0](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.2.0).
+Download: [LocalUpload-0.2.0.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk),
+35,900,709 bytes; also retained at `artifacts/LocalUpload-0.2.0.apk`.
+SHA-256: `84c4614010f1b9811fb0be97d29d48abe7d8490f0db18322b76ba02e0c757b87`,
 signed with the original release certificate
 (`65aa570406522f3ea7ca5920ee45c21392b58573a0597894b202c7f9ea373e5f`).
+The anonymous public APK and its [checksum file](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk.sha256)
+were downloaded and match the tested artifact byte-for-byte.
 
 | Required outcome | Acceptance evidence | State |
 | --- | --- | --- |
