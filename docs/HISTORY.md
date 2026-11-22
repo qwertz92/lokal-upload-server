@@ -1,5 +1,22 @@
 # History
 
+## 2026-11-23 — Android lookups, host names and a bilingual page: 0.2.1
+
+Published `v0.2.1` with its original-key signed APK and checksum.
+
+Trigger: the measurements for 0.2.0 had shown that an upload to the Android app cost 0.27 s into an empty folder and 11.2 s into one with 1000 files, because every path lookup listed the whole parent folder and one upload made several. The app now asks the document provider for a child by the id it predicts from the path; an upload costs 0.12 to 0.15 s whatever the folder holds. The same rework made the app treat `CaseProbe.txt` and `caseprobe.txt` as one file, as Android's storage does; 0.2.0 answered such an upload with 500.
+
+Lessons:
+
+- A missing document is not reported the same way everywhere. Android 17 answers a lookup of a file that does not exist with an `IllegalArgumentException` that wraps the provider's `FileNotFoundException`, not with an empty result; the first build treated that as a failure and 8 of 13 recovery scenarios broke. The storage layer's assumptions about the provider are now measured at every start (a name that cannot exist must come back missing, an existing entry must be found under another case spelling), and anything unexpected falls back to listing.
+- Two lookup modes mean two spellings of the same file in the journal. The review found that a replacement recorded in one mode and recovered in the other compared `…/caseprobe.txt` with `…/CaseProbe.txt`, called them different documents and refused every later start. Four recovery scenarios with a case-variant name now run in both modes; without the fix exactly the two cross-mode ones failed.
+- The cross-origin rule of 0.2.0 compared `Origin` with `Host`, which a website passes after pointing its own domain at the server's address. The server now answers only under an IP address, `localhost`, a name without a dot, a `.local` name or the computer's own name; `--allow-host` adds others. A rule that compares two values an attacker both controls is no rule.
+- Text inserted into a page needs the page's rules, not the terminal's: the folder name shown on the page is escaped for the script it sits in, and stripped of control characters and of the characters that reverse the writing direction, which had mirrored the sentence around it.
+
+Page and app: the page says where files end up, follows the browser's language (German or English, `?lang=` overrides) and hides its status bar until there is a job. The conflict dialog states the count, asks to tick the files to replace and keeps the filter and folder rules behind one line for long lists; Abort is labelled as ending the current job only. The app's screen starts with Start, Stop and the address.
+
+Review: the page breaker found no P1 or P2 and five smaller points, three fixed (progress bytes of a failed attempt stayed in the bar while the server was unreachable; the direction characters above; `de…` language tags that are not German). The storage review, done from reading, found no P1, one P2 as a hypothesis for Android 8 to 10 (the direct lookup may distinguish case there), which the start-up measurement now decides on the device, and the cross-mode recovery defect above. A breaker check of those fixes found no P1 or P2: on storage that distinguishes case, comparing names without regard to case can make recovery pick a neighbouring file, which only matters if the Android 8 to 10 hypothesis is true and is listed in the [open issues](BUGS.md) with its fix. It also showed that two of the four new recovery scenarios pass on the old code: a scenario is evidence only once it has been seen to fail. The two older server variants under `legacy/` were removed: unmaintained, and without any of the 0.2.0 fixes.
+
 ## 2026-11-22 — Stalled connections, a rebuilt page and Android 0.2.0
 
 Published `v0.2.0` with its original-key signed APK and checksum; the anonymous public download matches the tested bytes.

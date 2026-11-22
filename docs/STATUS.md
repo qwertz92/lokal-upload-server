@@ -1,55 +1,53 @@
 # Status
 
-Updated: 2026-11-22
+Updated: 2026-11-23
 
-Version 0.2.0 makes the server and its page survive connections that stall,
-reset or lose an answer, and reworks the page. The server file is now
-`upload_server.py`; the two older variants moved to `legacy/`. The Android app
-additionally holds a Wi-Fi lock, keeps its screen on while the server runs
-(optional, on by default) and keeps 500 log entries. What triggered the work and
-what it taught: [history](HISTORY.md).
+Version 0.2.1 removes the slowdown of the Android app in full folders, makes
+it ask before replacing a file whose name differs only in case, lets the server
+answer only under host names it can trust, and reworks what a person sees: the
+page says where files go, speaks German or English and has a shorter conflict
+dialog; the app's main screen starts with Start, Stop and the address. The two
+unmaintained older server variants are gone. What changed and what it taught:
+[history](HISTORY.md).
 
-Published: [release 0.2.0](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.2.0).
-Download: [LocalUpload-0.2.0.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk),
-35,900,709 bytes; also retained at `artifacts/LocalUpload-0.2.0.apk`.
-SHA-256: `84c4614010f1b9811fb0be97d29d48abe7d8490f0db18322b76ba02e0c757b87`,
+Published: [release 0.2.1](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.2.1).
+Download: [LocalUpload-0.2.1.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.1/LocalUpload-0.2.1.apk),
+35,917,641 bytes; also retained at `artifacts/LocalUpload-0.2.1.apk`.
+SHA-256: `da55a77fd9082ec94353bc2e6683e4abd70e90fcdf7d4262aca5ed0ace8d4a9a`,
 signed with the original release certificate
 (`65aa570406522f3ea7ca5920ee45c21392b58573a0597894b202c7f9ea373e5f`).
-The anonymous public APK and its [checksum file](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk.sha256)
-were downloaded and match the tested artifact byte-for-byte.
 
 | Required outcome | Acceptance evidence | State |
 | --- | --- | --- |
-| Stalled, flowing and replaced requests, lost answers, status ownership, release order | 81 Python tests (42 before); green on Windows (Python 3.15), WSL (3.14, six runs in a row) and Python 3.8; 75 of them also on 3.10 before the last six were added. Each new test was shown to fail against the previous behaviour | Passed |
-| Page under faults | Real browser against a fault-injecting server: lost answer recovered through the status call, stalled request replaced, resets retried, unreachable server waited out, stop after five failures and the order of Retry, Abort in every phase; no page errors | Passed |
-| No unasked overwrite | Browser: a file stored by another client between the check and the upload kept its content and was reported as skipped; a ticked file was replaced | Passed |
-| Page layout and touch | Measured at 320 and 375 px: no horizontal overflow, every button at least 44 px on a touch device, notes wrap | Passed |
-| Android update keeps configuration | In-place 0.1.2 to 0.2.0 kept the folder grant and the Privacy choice; keep-screen-on defaults to on | Passed |
-| Wi-Fi lock and keep-screen-on | `dumpsys wifi`: lock held while running, released on Stop; `dumpsys window`: flag follows server state and checkbox in both activities | Passed on the emulator |
-| Normal and private uploads on the device | 14 checks per mode on the final APK, including the status call, the cross-origin rule and a stalled upload replaced by its retry | Passed |
-| Native log | 500 entries kept; the viewport stays pixel-identical while older entries are read and new ones arrive | Passed on the build before the final one (Java unchanged since) |
-| Release identity | Version 0.2.0/code 4, original certificate, v2 signature, 16 KiB alignment; bytecode in the APK equals the compiled working-tree sources | Passed |
-| Android lint | One finding: Gradle 9.9.2 exists, the wrapper uses 9.8.0 | Open, see [open issues](BUGS.md) |
-| Interrupted replacement recovery | The 13 native scenarios were not rerun; `SafStorage.java` is unchanged since 0.1.2 | Not rerun |
-| Independent review | Three breaker rounds and one final fresh-context review; the final state has no known P1 or P2 in the changed code, smaller findings are fixed or listed in the open issues | Passed |
-
-Open: receiving on Android slows down as the destination folder fills (P2,
-present since 0.1.0), and a name that differs only in case from an existing file
-is answered with 500 there. Both are in [open issues](BUGS.md) with measurements.
+| Server rules: host names, counted path reservations, byte counter, reserved names, destination text | 92 Python tests (81 in 0.2.0); green on Windows (Python 3.15) and on WSL with 3.14, 3.10 and 3.8 | Passed |
+| Android upload time independent of folder size | 15 KB file, median of 8, Android 17 emulator: 0.12 s into an empty folder, 0.13 s with 50 files, 0.14 s with 200, 0.15 s with 1000 (0.2.0: 0.27, 0.80, 2.84 and 11.2 s) | Passed |
+| Android lookup mode is measured, not assumed | App log `Folder lookups: direct` on Android 17; the recovery run fails if the device does not choose direct or the forced run does not list | Passed on Android 17 only |
+| Interrupted replacement recovery | 17 scenarios (13 from 0.1.0, 4 new with a case-variant name) plus the mode check, each in direct and in forced listing mode: 36 of 36. Without the recovery fix exactly the two cross-mode scenarios failed; the other two new ones pass on the old code too | Passed |
+| Names that differ only in case on Android | `caseprobe.txt` into a folder holding `CaseProbe.txt`: the check reports it as existing, `skip` answers 409 and keeps the file, a ticked replacement stores the new content as the only file | Passed |
+| Android update keeps configuration | In-place 0.2.0 to 0.2.1 kept the folder grant, the Privacy choice and a switched-off keep-screen-on | Passed |
+| Normal and private uploads on the device | 15 checks per mode on the final APK | Passed |
+| Page: both languages, destination line, conflict dialog | Real browser at phone and desktop width in German and English; on the device the line reads "... saved in Internal storage › Documents › LocalUploadTest-v020 on sdk_gphone16k_x86_64" and `?lang=de` switches the page | Passed in Chromium |
+| App main screen | 32 screenshots: English and German, light and dark, font scale 1.0 and 1.3, running and stopped | Passed on the emulator |
+| Release identity | Version 0.2.1/code 5, original certificate, v2 signature, 16 KiB alignment; the server compiled into the APK equals `upload_server.py` of the release commit | Passed |
+| Android lint and compile | Gradle 9.9.2: lint "No issues found", Java with warnings as errors | Passed |
+| Independent review | Page: one breaker round, no P1 or P2. Android storage: one fresh-context review (no P1, one P2 as a hypothesis for Android 8 to 10, now decided by the start-up measurement) and one breaker check of the fixes (no P1 or P2). Smaller findings are fixed or listed in the [open issues](BUGS.md) | Passed |
 
 Not verified:
 
-- The incident itself was not reproduced. Whether the phone's Wi-Fi power
-  saving or the sending laptop's security client stalled the connection is
-  unknown; the server-side amplification of such stalls is what was fixed.
-- No physical phone: real Wi-Fi power saving, the effect of the Wi-Fi lock with
-  the screen off (by Android's documentation none from Android 14 on), vendor
-  battery policies, SD cards and ARM64 execution are untested.
+- No physical phone and no Android version other than 17. On Android 8 to 10
+  the app is expected to choose the slower listing mode; that it does, and that
+  names are then handled correctly, is unchecked (see [open issues](BUGS.md)).
+- SD cards, ARM64 execution, vendor battery policies and real Wi-Fi power
+  saving, as in 0.2.0.
+- The page was exercised in Chromium only; Firefox and Safari were not
+  available. A browser whose first language is German was simulated with
+  `?lang=de`, not with a German browser profile.
 - macOS and a sending computer behind a company proxy were not available.
-- The status check after a "busy" answer in the page was only checked for
-  syntax, not exercised in a browser.
+- The incident that started 0.2.0 (36 small files taking 18 minutes) was not
+  reproduced; both of its amplifiers on the receiving side, the stalled-request
+  handling and the per-file cost in a full folder, are fixed.
 
-Build, device and review receipts are under `artifacts/v0.2.0/` and remain
+Build, device and review receipts are under `artifacts/v0.2.1/` and remain
 outside Git. The app still embeds the authoritative Python server; no second
 HTTP or browser implementation is maintained. Rebuild and device checks:
 [android/README.md](../android/README.md).
@@ -61,7 +59,7 @@ backup of its keystore and password properties has not been verified; see
 Device verification uses an Android 17 x86-64 emulator with a real document
 provider and 16 KiB pages.
 
-The lead on this round was Claude Fable 5.2 (analysis, server and page, fixes,
-integration); the Android changes and the final review ran on Opus, tests and
-breaker rounds on Sonnet. The lead verified test outputs, receipts, artifact
-identity and delivery.
+The lead on this round was Claude Fable 5.2 (server changes, integration,
+triage of review findings); the Android changes and the storage reviews ran on
+Opus, the page rework, tests and the page breaker on Sonnet. The lead verified
+test outputs, receipts, artifact identity and delivery.

@@ -6,28 +6,106 @@ Location: Chaquopy 17.0.0 Gradle plugin; details in [Android build instructions]
 
 Trigger: any Android build with the default strict Gradle warning gate. Chaquopy
 uses four deprecated Gradle API families, including APIs removed in Gradle 10.
-The current Gradle 9.8 build succeeds with the documented `--warning-mode all`
+The current Gradle 9.9 build succeeds with the documented `--warning-mode all`
 exception; application Java warnings and Android lint remain fatal. The signed
 APK is unaffected. Upgrading Gradle to 10 before the plugin is fixed would break
 building. Recheck on the next Chaquopy upgrade; app-specific patches or a plugin
 fork are not justified for these upstream maintenance warnings.
 
-## 2026-11-22 — P3: a re-pointed domain passes the cross-origin check
+## 2026-11-23 — P3: Android 8 to 10 may distinguish case where the app does not
 
-Location: `SimpleUploadServer._same_origin` in `upload_server.py`.
+Location: `SafStorage.listed()`, `recover()` and `rollback()` in
+`android/app/src/main/java/at/farfeleder/localupload/SafStorage.java`.
 
-Trigger: DNS rebinding. A website the user has open is served from a domain that
-is afterwards pointed at the server's LAN address. Its requests then carry an
-`Origin` equal to the `Host` they are sent to, which is exactly what the check
-compares, so they are accepted (reproduced with hand-built headers:
-`Host: evil.example:PORT` plus `Origin: http://evil.example:PORT` returns 200; not
-attempted with a real browser, where Chrome's private-network rules may stop it).
-The effect is an upload into the folder by a site outside the network, in normal
-mode only: `--private` and Android's Privacy mode are unaffected because the
-secret link is unknown to that site. Closing it means accepting only `Host`
-values the server knows as its own, which would also turn away people who reach
-it through a router-assigned name such as `phone.fritz.box`; that trade-off is
-undecided. Effort: about an hour including an opt-out.
+Trigger: unconfirmed, because only Android 17 was run. Two reviews expect from
+reading the platform sources that on Android 8 to 10 the document provider
+works on a file system that keeps `Report.pdf` and `report.pdf` apart. The
+app's start-up measurement would notice (the log then says `Folder lookups: by
+listing`) and compare names without regard to case, as intended. What follows
+there, if the expectation holds:
+
+- A folder that already holds both spellings (0.2.0 could create such pairs
+  there) refuses uploads of either name with "duplicate filename". Nothing is
+  lost.
+- An upload that crashed while 0.2.0 or 0.2.1 was installing it, in a folder
+  with such a pair, can stop the server from starting after the update: the
+  recovery finds two candidates, or one whose content does not match. The way
+  out is clearing the app's storage; the files stay.
+- In one constructed case a user file is deleted: the crashed upload was
+  `report.pdf`, the user removed it before the restart, and `Report.pdf` has
+  byte-identical content. Recovery then takes `Report.pdf` for the unfinished
+  upload and removes it.
+
+Fix: in listing mode prefer the entry with exactly the requested name, and let
+recovery adopt a file as "the upload" only under exactly the recorded
+spelling (an installed upload always has it). Effort: one to two hours with
+the device run, and it should be checked on an Android 9 or 10 system image
+(about 1 GB to download), which also settles whether the expectation is true.
+
+## 2026-11-23 — P4: the start-up measurement can fail where uploads would fail anyway
+
+Location: `SafStorage.measureDirectLookups()`.
+
+Trigger: a destination without any entry that has an ASCII letter (empty, or
+only names such as `2024`) on storage that cannot create a file (full card, I/O
+error). The measurement creates and deletes an empty hidden probe file there;
+if that fails, Start reports the storage error. 0.2.0 started and failed at the
+first upload instead. A crash exactly between creating and deleting the probe
+leaves one empty hidden file `.localupload-pending-…` behind.
+
+## 2026-11-23 — P4: two of the four case-variant recovery scenarios prove little
+
+Location: `SafStorageRecoveryCheck.java`, scenarios `case_backup_rename_gap`
+and `case_install_recorded_gap`.
+
+They pass on the 0.2.0 code as well, because their paths never compare the
+recorded spelling with the stored one. The two `case_replacing_*` scenarios do
+fail without the fix. Not covered by any scenario: the uniqueness check inside
+`sameDocument`, the case-variant branch of `listed()` for a recorded identity,
+the stricter guard in `discard()`, and the probe-file branch of the start-up
+measurement (the test folder is never empty).
+
+## 2026-11-22 — P3: replacing a file under another spelling renames it
+
+Location: `SafStorage.commit()` and `rollback()`.
+
+Trigger: the folder holds `CaseProbe.txt` and a sender replaces it by uploading
+`caseprobe.txt`. The stored file is then called `caseprobe.txt`. If that
+replacement fails halfway, the original content is restored, but also under the
+sender's spelling. No content is lost; a program that expects the old spelling
+on a case-sensitive view of the storage would miss the file. The direct lookup
+cannot learn the stored spelling, and listing the folder for every replacement
+would bring back the slowdown fixed in 0.2.1.
+
+## 2026-11-22 — P3: names that differ in non-ASCII case or Unicode form
+
+Location: `SafStorage.sameName()` (listing fallback) and `_path_key` in
+`upload_server.py`.
+
+Trigger (derived from file-system rules, not reproduced): the app and the
+server fold case with the full Unicode rule, so `Ärger.txt` and `ärger.txt`
+count as one file. FAT and exFAT cards and the storage view of Android 8 to 10
+fold ASCII letters only and keep the two apart. In the listing fallback a
+sender who ticks "replace" for `ärger.txt` then replaces `Ärger.txt`, and a
+folder that already holds both spellings refuses uploads of that name
+("duplicate filename"). The opposite gap exists on Android 11 and newer:
+spellings that only Unicode normalisation joins (composed and decomposed `é`,
+`ß` and `SS`) are two files for the server and one for the storage, so the
+second of two such files in one job is refused after its transfer, or replaces
+the first when "replace" was ticked. Only the sender's own files are affected
+in that second case.
+
+## 2026-11-22 — P3: a folder rule also changes rows hidden by the filter
+
+Location: conflict dialog in `upload_server.py` (`openConflictDialog`, folder rules).
+
+Trigger: more than eight conflicts, a path filter that hides some files of a
+folder, then setting that folder's rule to `replace`. The rule ticks every file
+of the folder, including the hidden ones. The summary line shows the totals
+("Replace 12 · keep 3 · showing 4 of 15"), so the change is visible but easy to
+miss. "Replace all shown" respects the filter; the folder rule deliberately
+means the whole folder. Making the rule follow the filter would need a third
+state for partly visible folders.
 
 ## 2026-11-22 — P4: Android entry point cannot stop idle connections on Windows
 
@@ -40,61 +118,6 @@ then raises "Upload cleanup is still running" after 3 s. Android is Linux, where
 the same case stops in under 0.1 s (15 rounds), so no user is affected. A stalled
 upload stops cleanly on both systems.
 
-## 2026-11-22 — P2: Android uploads slow down as the destination folder fills
-
-Location: `SafStorage.child()` in `android/app/src/main/java/at/farfeleder/localupload/SafStorage.java`.
-
-Trigger: every upload into a folder that already holds files. Each path lookup
-asks the document provider for the complete list of the parent folder and
-searches it by name, and one upload makes several lookups. Measured on the
-Android 17 emulator with a 15 KB file (median of 8, `artifacts/v0.2.0/timing-receipt.json`):
-0.5 s into an empty folder, 1.5 s with 50 files in it, 4.1 s with 200. A job of
-100 small files into one folder therefore takes minutes on a perfect network.
-Present since 0.1.0; unrelated to the stalled-connection fixes of 0.2.0. A fix
-(one listing per upload, or addressing a child directly where the provider's
-document ids allow it) changes the storage code, so the 13 recovery scenarios
-must be rerun on a device. Effort: one to two hours including that run.
-
-## 2026-11-22 — P3: lint gate fails on a newer Gradle release
-
-Location: `android/gradle/wrapper/gradle-wrapper.properties`.
-
-Trigger: `./gradlew lintRelease`. Its only finding is that Gradle 9.9.2
-(released 2026-11-19) is newer than the wrapper's 9.8.0; application code has no
-lint finding and Java still compiles with warnings as errors. The 0.2.0 APK was
-built with 9.8.0, like 0.1.2. Upgrading needs the new distribution checksum in
-the wrapper and one build plus device run, because Chaquopy 17 is untested on
-9.9 (see the Chaquopy entry above). Not done on 2026-11-22: the agent session's
-permission system refused the wrapper change. Effort: about 30 minutes.
-
-## 2026-11-22 — P3: Android answers 500 for a name that differs only in case
-
-Location: `SafStorage.child()` (exact name comparison) and `android_server.start()`,
-which never sets the shared server's case rule.
-
-Trigger: uploading `caseprobe.txt` into a folder that holds `CaseProbe.txt`.
-Android's shared storage treats the two as one file, while the app compares
-names exactly. Reproduced on the Android 17 emulator with 0.2.0
-(`artifacts/v0.2.0/caseprobe-release.json`): the check before the job reports no
-conflict, the provider stores the upload as `caseprobe (1).txt`, the app notices
-the changed name, removes it again and answers `500 Storage operation failed`,
-with `on_exists=skip` and with `overwrite` alike. The existing file keeps its
-content and nothing is left behind. The page treats 500 as worth repeating, so
-it sends the file up to eight times before listing it as failed with that vague
-message. Expected: a conflict the user can decide, as on the desktop. Belongs
-with the lookup rework in the P2 entry above.
-
-## 2026-11-22 — P4: a path reservation is released by job, not by request
-
-Location: `_ServerState.reserve_path` and `release_path` in `upload_server.py`.
-
-Trigger (derived, not reproduced): a job's retry arrives from another IP address
-(the sender roamed or a VPN reconnected) while its stalled first request is still
-open. Both hold the same reservation; when the old request ends, the reservation
-of the running one is released with it, so a third job could write the same path
-at the same time. Each writer uses its own temporary file and the last complete
-one wins, so no partial file can result.
-
 ## 2026-11-22 — P4: the Android log repaints unevenly at 500 entries
 
 Location: `LogActivity.render()`.
@@ -103,3 +126,19 @@ Trigger: watching the log while many uploads run. With 500 entries and 560
 requests in 9.6 s, 47 % of frames were late (median 17 ms, 99th percentile
 57 ms); no freeze. The whole text is set again for every change. No measurement
 with the earlier limit of 200 exists to compare against.
+
+## 2026-11-22 — P4: a job's title counts files that are dropped as duplicates
+
+Location: `filesLabel` and its callers in the page script of `upload_server.py`.
+
+Trigger: selecting files of which some are already in the queue. The job title
+("Files: 5 (a.pdf ...)") is built before those are left out, while the line
+below it shows the real count. Cosmetic.
+
+## 2026-11-22 — P4: the status call counts a reused job id per check
+
+Location: `_ServerState` session bookkeeping in `upload_server.py`.
+
+Trigger: only a hand-written client that sends several file-list checks for the
+same path under one job id; the page never does. `/api/status` then reports
+`"done_files": 0` with `"total_files": 1` after the file is stored.

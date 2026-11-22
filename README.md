@@ -4,10 +4,10 @@ Send files and whole folders from any browser to another device in the same
 network. One Python file, no installation, no internet access needed. An Android
 app runs the same server on a phone.
 
-**Android: [Download the signed Local Upload 0.2.0 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk)**
+**Android: [Download the signed Local Upload 0.2.1 APK](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.1/LocalUpload-0.2.1.apk)**
 · [Installation steps](#android-app)
-· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk.sha256)
-· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.2.0)
+· [SHA-256 checksum](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.1/LocalUpload-0.2.1.apk.sha256)
+· [Release page](https://github.com/qwertz92/lokal-upload-server/releases/tag/v0.2.1)
 
 The prebuilt APK is already signed and includes Python. Installing it needs no
 build tools or account.
@@ -27,7 +27,8 @@ browser on the sending device, choose files or a folder, and they arrive in the
 another folder.
 
 Until November 2026 the file was called `2025_12_python_upload_webserver.py`;
-only the name changed.
+only the name changed. Two older, simpler variants were removed in 0.2.1; they
+remain in the Git history up to tag `v0.2.0`.
 
 ## No dependencies
 
@@ -51,11 +52,14 @@ python upload_server.py --selftest
 - Files and folders, with the folder structure preserved. Choose them with the
   two buttons or drop them anywhere on the page; choosing is adding, there is
   no second step.
+- The page names the folder and the device the files end up on, and it speaks
+  English or German: German when that is the browser's first language, English
+  otherwise. Add `?lang=de` or `?lang=en` to the address to choose yourself.
 - A queue: jobs upload one after another, can be reordered while they wait, and
   the overall progress stays visible at the top.
 - A check before each job: files that already exist on the server are listed,
-  and you decide per file or per folder whether to overwrite or keep them. Free
-  disk space is checked at the same time.
+  and you tick the ones to replace; the rest stay as they are. Free disk space
+  is checked at the same time.
 - Uploads are streamed to disk in 1 MiB pieces, never held in memory, and written
   to a temporary file first. An existing file is only replaced once its
   replacement has arrived completely.
@@ -98,11 +102,14 @@ The Android app requires Android 8 or newer on a 64-bit ARM phone (or an x86-64
 emulator) and runs the same upload server on your phone. Python is bundled in
 the APK: no terminal, Python installation, account or internet service is needed.
 
-Version 0.2.0 contains the more robust transfer handling described above and
-keeps Wi-Fi awake while the server runs. Open the new APK and choose **Update**
-without uninstalling; the folder selection and settings are kept.
+Version 0.2.1 stores a file equally fast whether the reception folder is empty
+or holds a thousand files (0.2.0 slowed down with every file already there),
+asks before replacing a file whose name differs only in upper and lower case,
+and puts Start, Stop and the address at the top of its screen. Open the new APK
+and choose **Update** without uninstalling; the folder selection and settings
+are kept.
 
-1. [Download LocalUpload-0.2.0.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.0/LocalUpload-0.2.0.apk)
+1. [Download LocalUpload-0.2.1.apk](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.1/LocalUpload-0.2.1.apk)
    on the phone and open it to install. This prebuilt APK is already signed; you
    do not need to build it or create an account. If Android blocks the
    installation, allow **Install unknown apps** for the browser or file manager
@@ -130,7 +137,7 @@ On Android 8 to 13 the app can additionally keep Wi-Fi fully awake with the
 screen off; from Android 14 on, the system only honours that request while the
 app is on screen.
 
-Open **Logs** (German: **Protokoll öffnen**) in the app to see stored files,
+Tap **Open log** (German: **Protokoll öffnen**) in the app to see stored files,
 retries, rejected requests and errors. **Copy** copies the log; **Clear** removes
 its entries. The last 500 entries are kept in memory during the app process:
 closing the log or stopping the server keeps them, but Android ending the app
@@ -163,6 +170,7 @@ Verification coverage and device limits: [docs/STATUS.md](docs/STATUS.md).
 | `--host` | `0.0.0.0` | Address to listen on; repeatable or comma-separated |
 | `--listen` | none | Full `HOST:PORT` pair; repeatable, for different ports per address |
 | `--private` | off | Require a generated secret link (see [Access](#access)) |
+| `--allow-host` | none | Also answer under this host name, for example a reverse proxy's domain; repeatable, `*` accepts any |
 | `--retry-count` | `3` | Automatic retries per file after a connection problem |
 | `--retry-delay-ms` | `800` | Delay before the first retry; doubles each time, at most 15 s |
 | `--stall-timeout-sec` | `45` | Silence after which the page abandons a request and retries; `0` never |
@@ -206,24 +214,35 @@ previous links stop working.
   page makes the browser send is refused (it carries that page's origin, which
   differs from the server's own address). Behind a reverse proxy this requires
   the proxy to pass the `Host` header through unchanged.
+- The server only answers when addressed by an IP address, `localhost`, a name
+  without a dot, a `.local` name or the computer's own name. That stops a
+  website from pointing a domain of its own at your server (DNS rebinding).
+  Any other name, such as a reverse proxy's domain, needs `--allow-host NAME`.
 - For internet exposure, put it behind a reverse proxy with HTTPS and
   authentication.
 
 ## Resolving conflicts
 
 When a job contains files that already exist on the server, a dialog lists them
-before anything is sent. `Esc` cancels the job.
+before anything is sent: "3 files are already on the server".
 
-- Tick single files to overwrite them, or set a whole folder to `overwrite` or
-  `keep` in the folder list (orange marks a folder with both).
-- `Overwrite all` applies to the rows currently shown, so it combines with the
-  path filter (searching `files`, `folders` or `both`) and the `Selection`
-  toggle (`all`, `selected`, `unselected`).
+- Tick the files you want to replace. Files you leave unticked stay as they are
+  and are not uploaded; all other files of the job upload normally.
+- **Replace all** ticks every file. **Continue** starts the job, **Cancel job**
+  or `Esc` drops it.
+- **Filter and folder rules** opens the tools for long lists: a path filter, a
+  switch between all files, those to replace and those to keep, and one rule
+  per folder (`keep`, `replace`; `mixed` marks a folder with both). With a
+  filter active the button reads **Replace all shown** and applies to the rows
+  on display. The section starts open when more than eight files are listed.
 - Files that another upload is writing right now are shown as `in progress`
-  and cannot be overwritten.
+  and cannot be replaced.
 - Only files you ticked are ever replaced. If another device stores a file
   under the same name after the check, yours is not sent over it; the job
   reports it as `skipped (already on server)`.
+- Where the destination ignores upper and lower case (Windows, Android,
+  usually macOS), `Report.pdf` and `report.pdf` are one file, and the dialog
+  treats them so. The server measures this when it starts.
 
 Browsers return one folder per folder dialog (only Safari allows several). To
 add several folders at once, drop them onto the page together.
@@ -244,11 +263,6 @@ add several folders at once, drop them onto the page together.
     locally must be downloaded by the sending computer before they can be sent.
     Mark the folder as available offline first.
   - Guest Wi-Fi often blocks devices from reaching each other.
-- **Receiving on Android gets slower the fuller the folder is.** The app
-  currently needs about half a second per file in an empty reception folder,
-  1.5 s with 50 files in it and 4 s with 200 (measured on an emulator,
-  [open issue](docs/BUGS.md)). For a job of many files, receive into a new,
-  empty subfolder.
 - **`Failed to bind ...` or `No server socket could be started`.** The address
   or port is invalid, in use, or blocked. Try `--port 8041`, or look up what
   uses the port (`netstat -ano | findstr :8040` on Windows).
@@ -259,6 +273,9 @@ add several folders at once, drop them onto the page together.
   target path right now. Wait for it or rename the source.
 - **A reverse proxy answers 403 "cross-origin request refused".** The proxy
   rewrites the `Host` header; configure it to pass the original one.
+- **403 "This server does not answer under the name ...".** You opened the
+  server by a host name it does not know. Use its IP address, or start it with
+  `--allow-host` and that name.
 
 ## Tests
 
@@ -268,8 +285,8 @@ python -m unittest discover -s tests
 
 The tests start the real server on a local port and cover exact storage of
 uploads, folder structure, conflicts, path rules, stalled and replaced requests,
-the status call, the cross-origin rule, Privacy mode and the Android entry point
-with a stand-in for its storage.
+the status call, the cross-origin and host-name rules, Privacy mode and the
+Android entry point with a stand-in for its storage.
 
 ## Repository layout
 
@@ -280,4 +297,3 @@ with a stand-in for its storage.
 - `scripts/android_smoke.py`: end-to-end checks against a running Android app
 - `docs/`: [status](docs/STATUS.md), [open issues](docs/BUGS.md),
   [history](docs/HISTORY.md), [ideas for later](docs/ROADMAP.md)
-- `legacy/`: two earlier, simpler server variants, kept for reference only

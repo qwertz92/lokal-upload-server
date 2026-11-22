@@ -21,6 +21,11 @@ in English. The existing MIT license remains authoritative.
 - The page sends `on_exists=overwrite` only for files the user ticked in the
   conflict dialog; everything else is sent as `skip`, so a file stored by someone
   else in the meantime is never replaced unasked.
+- The server answers only under host names `_host_allowed` accepts; a new route
+  must keep the checks at the top of `do_GET` and `do_POST`.
+- Every text a person reads on the page is a key in `STRINGS` with an English and
+  a German entry; add both. Text from outside the page (folder or device name,
+  server errors) goes in through `textContent`, never as markup.
 - Uploads must stream with bounded memory. An aborted/failed replacement must
   preserve the previous file, and temporary-file cleanup must not delete user data.
 - Android uses a persisted Storage Access Framework tree grant, not broad storage
@@ -28,6 +33,10 @@ in English. The existing MIT license remains authoritative.
   is explicitly optional; when enabled, require its per-run capability on every
   supported GET/POST endpoint through the shared handler. Changing the Android
   mode requires a stopped server.
+- `SafStorage` finds a child either by its predicted document ID or by listing
+  the folder, decided by a measurement at start. Both modes must give the same
+  answers; a change to the storage code reruns the recovery scenarios, which
+  cover both modes, on a device.
 - Keep keys, signing passwords, received files, SDKs and generated artifacts out of
   Git. A delivered APK must use the project's release key, never a debug key.
 - Work on `main`, commit signed logical changes and push after local checks pass.
