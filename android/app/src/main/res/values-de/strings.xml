@@ -23,6 +23,11 @@
     <string name="address_missing">Die Adresse erscheint, während der Server läuft und mit WLAN oder Ethernet verbunden ist.</string>
     <string name="copy_address">Adresse kopieren</string>
     <string name="share_address">Adresse teilen</string>
+    <string name="copy">Kopieren</string>
+    <string name="share">Teilen</string>
+    <string name="activity_heading">Aktivität</string>
+    <string name="storage_internal">Interner Speicher</string>
+    <string name="storage_sd_card">SD-Karte</string>
     <string name="address_copied">Adresse kopiert</string>
     <string name="trust_note">Nur in einem vertrauenswürdigen lokalen Netz verwenden. HTTP verschlüsselt weder Uploads noch die Adresse. Im Normalmodus können andere Geräte in diesem Netz hochladen. Der Privatmodus erfordert den geheimen Link, der sich bei jedem Start ändert. Stoppe den Server nach Gebrauch.</string>
     <string name="notification_channel">Lokale Uploads</string>

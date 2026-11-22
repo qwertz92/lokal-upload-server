@@ -24,6 +24,11 @@
     <string name="address_missing">An address appears while the server is running and connected to Wi-Fi or Ethernet.</string>
     <string name="copy_address">Copy address</string>
     <string name="share_address">Share address</string>
+    <string name="copy">Copy</string>
+    <string name="share">Share</string>
+    <string name="activity_heading">Activity</string>
+    <string name="storage_internal">Internal storage</string>
+    <string name="storage_sd_card">SD card</string>
     <string name="address_copied">Address copied</string>
     <string name="trust_note">Use only a trusted local network. HTTP does not encrypt uploads or the address. In normal mode, other devices on this network can upload. Privacy mode requires the secret link, which changes each start. Stop the server when finished.</string>
     <string name="notification_channel">Local uploads</string>
@@ -36,7 +41,7 @@
     <string name="close">Close</string>
     <string name="licenses">Open-source licenses</string>
     <string name="licenses_error">Could not open the bundled license notices.</string>
-    <string name="open_logs">Logs</string>
+    <string name="open_logs">Open log</string>
     <string name="log_title">Activity log</string>
     <string name="log_help">Last 500 events in this app session; cleared when the app process exits. HTTP requests show observed activity, not continuously connected clients.</string>
     <string name="log_empty">No events yet.</string>

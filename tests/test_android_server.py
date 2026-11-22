@@ -99,6 +99,9 @@ class AndroidServerTest(unittest.TestCase):
     token = "0123456789abcdef0123456789abcdef"
 
     def setUp(self):
+        # start() sets process-wide server options; restore them for other test modules.
+        self._case_rule = upload_server._CASE_INSENSITIVE
+        self._destination = dict(upload_server._DESTINATION)
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.storage = FakeSafStorage(self.root)
@@ -107,6 +110,8 @@ class AndroidServerTest(unittest.TestCase):
     def tearDown(self):
         android_server.stop()
         self.directory.cleanup()
+        upload_server._CASE_INSENSITIVE = self._case_rule
+        upload_server._DESTINATION.update(self._destination)
 
     def request(self, method, path, body=None, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -155,6 +160,28 @@ class AndroidServerTest(unittest.TestCase):
         status, _ = self.upload(rel, b"replacement", "overwrite")
         self.assertEqual(status, 200)
         self.assertEqual(target.read_bytes(), b"replacement")
+
+    def test_start_declares_case_insensitive_names_and_the_destination(self):
+        upload_server._CASE_INSENSITIVE = False
+        self.port = android_server.start(self.storage, self.token, 0, None,
+                                         "Internal storage › Download", "Pixel 10")
+        self.assertTrue(upload_server._CASE_INSENSITIVE)
+        self.assertEqual(upload_server._DESTINATION,
+                         {"folder": "Internal storage › Download", "device": "Pixel 10"})
+        # Two spellings of one name inside a job are one target on Android.
+        status, body = self.preflight([{"path": "Case/Probe.txt", "size": 3},
+                                       {"path": "case/probe.TXT", "size": 3}])
+        self.assertEqual(status, 200, body)
+        conflicts = json.loads(body)["conflicts"]
+        self.assertEqual([item["reason"] for item in conflicts], ["duplicate_in_request"])
+        # A content URI never reaches the page; Java passes None when it has nothing.
+        self.port = android_server.start(
+            self.storage, self.token, 0, None,
+            "content://com.android.externalstorage.documents/tree/primary%3AX", None)
+        self.assertEqual(upload_server._DESTINATION, {"folder": "", "device": ""})
+        # The four-argument call of 0.2.0 still works and clears the names.
+        self.port = android_server.start(self.storage, self.token, 0, None)
+        self.assertEqual(upload_server._DESTINATION, {"folder": "", "device": ""})
 
     def test_status_route_needs_the_private_prefix_and_reports_stored_files(self):
         query = urlencode({"upload_id": "android-upload", "path": "state/s.bin"})

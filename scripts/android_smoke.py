@@ -221,6 +221,29 @@ class Smoke:
                      f"Status reports an unsent file as stored: {status}, {payload}")
         self.passed("status reports stored and unsent files", **self.files[rel])
 
+        # Shared storage treats names that differ only in case as one file; so must the app.
+        upper = self.run + "/case/CaseProbe.txt"
+        lower = self.run + "/case/caseprobe.txt"
+        self.put(upper, b"one")
+        conflict = self.preflight(lower, 3)
+        self.require(any(item.get("reason") == "exists" for item in conflict.get("conflicts", [])),
+                     f"Case-only clash absent from preflight: {conflict}")
+        status, body = self.upload(lower, b"two", "skip")
+        self.require(status == 409 and json.loads(body).get("error") == "exists",
+                     f"Case-only clash with skip: {status}, {body!r}")
+        self.verify(upper, 3, hashlib.sha256(b"one").hexdigest())
+        status, body = self.upload(lower, b"two", "overwrite")
+        self.require(status == 200, f"Case-only clash with overwrite: {status}, {body!r}")
+        names = self.adb("ls " + shlex.quote(self.device_path(self.run + "/case"))).split()
+        self.require(len(names) == 1 and names[0].lower() == "caseprobe.txt",
+                     f"Case-only overwrite left these files: {names}")
+        self.files.pop(upper)
+        self.files.pop(lower, None)
+        # Track the spelling that is actually on disk, for exact listing checks and cleanup.
+        self.verify(self.run + "/case/" + names[0], 3, hashlib.sha256(b"two").hexdigest())
+        self.passed("case-only name clash: conflict, skip 409, overwrite replaces one file",
+                    spelling_after_overwrite=names[0])
+
         cross = self.run + "/cross-origin.bin"
         self.files[cross] = {}
         foreign = {"Origin": "http://attacker.example"}

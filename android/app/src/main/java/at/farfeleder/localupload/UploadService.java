@@ -222,8 +222,14 @@ public final class UploadService extends Service {
                 previousLog.close();
                 SafStorage storage = new SafStorage(getApplicationContext(), tree);
                 storage.validate();
+                // Says next time why a phone is slow: listing costs time per file in the folder.
+                runLog.log("Folder lookups: "
+                        + (storage.directLookups() ? "direct" : "by listing"));
+                // Readable names for the page only; never the tree URI or a raw document ID.
                 actualPort = Python.getInstance().getModule("android_server")
-                        .callAttr("start", storage, runToken, 8040, runLog).toInt();
+                        .callAttr("start", storage, runToken, 8040, runLog,
+                                Names.folderForPage(getApplicationContext(), tree),
+                                Names.device(getApplicationContext())).toInt();
                 if (actualPort < 1 || actualPort > 65535) {
                     throw new IllegalStateException("The server returned an invalid port");
                 }

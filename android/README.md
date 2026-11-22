@@ -14,7 +14,7 @@ ARM64 phones and x86-64 emulators, and targets Android 17 (API 37).
 
 Install JDK 17 or newer, Python 3.14, and Android SDK platform 37 plus build tools
 37.0.0. Point `ANDROID_HOME` at the SDK, or put `sdk.dir=/absolute/sdk/path` in
-ignored `local.properties`. Gradle 9.8.0 is downloaded by the checksum-verified
+ignored `local.properties`. Gradle 9.9.2 is downloaded by the checksum-verified
 wrapper. AGP 9.4.1 is the newest stable release checked on 2026-09-29 and has built
 the signed APK successfully. Chaquopy documents compatibility through AGP 9.2;
 the newer version is selected based on this project's measured build result.
@@ -86,7 +86,9 @@ The signed APK is generated at `app/build/outputs/apk/release/app-release.apk`.
 The project keeps Gradle's default gate at `warning.mode=fail`. The explicit
 `--warning-mode all` in the artifact commands permits the currently unavoidable
 Chaquopy 17 build-plugin deprecations to be reported while app Java warnings and
-Android lint still fail the build. Measured on 2026-09-28:
+Android lint still fail the build. Measured on 2026-09-28 with Gradle 9.8.0 and
+again on 2026-11-22 with 9.9.2, which reports the same four and builds Chaquopy 17
+without further findings:
 
 - Multi-string dependency declarations and execution-time `Task.project` access
   are scheduled for removal in Gradle 10.
@@ -102,8 +104,12 @@ Gradle 10 until its plugin has migrated these APIs. No app lint baseline is used
 
 `UploadService` serializes every Python operation on one process-wide executor:
 
-- `android_server.start(SafStorage, token, 8040, logSink)` returns the actual listening port;
-  Java `null` / Python `None` selects normal mode, a nonempty token selects Privacy mode.
+- `android_server.start(SafStorage, token, 8040, logSink, folder, device)` returns the
+  actual listening port; Java `null` / Python `None` selects normal mode, a nonempty token
+  selects Privacy mode. `folder` and `device` are readable names shown on the browser page
+  (for example "Internal storage › Download" and the device name from Settings, else the
+  model); they are empty when unknown and never a content URI or raw document ID.
+  `start()` also tells the shared server that names differ only by case on this storage.
 - `android_server.stop()` closes the listener and finishes active requests.
 - `SafStorage(Context, persistedTreeUri).validate()` checks the selected folder.
 
@@ -113,6 +119,30 @@ HTTP worker threads send events to a bounded in-memory log (500 entries, up to
 capability and URLs are redacted before display/copy. Log callbacks must never
 change an HTTP response or interrupt storage work. Logs survive server stop and
 activity recreation, but not app-process termination; there is no disk log.
+
+Shared storage treats `CaseProbe.txt` and `caseprobe.txt` as one file, and so does
+the app: the check before a job reports the existing file as a conflict, `skip`
+answers 409 `exists`, `overwrite` replaces the existing file (it then carries the
+uploaded spelling), and two spellings in one job count as one target.
+
+`SafStorage` looks a child up with one query by its document ID ("direct") when a
+measurement at every start says that gives the answers listing would give: the IDs
+of every entry of the selected folder must be the external-storage provider's
+path-based form (`primary:Documents/Inbox`), a random name must come back as a clean
+"missing", and an existing entry must be found under its ASCII-case-swapped
+spelling. In an empty folder (or one without ASCII letters in its names) that last
+check creates an empty `.localupload-pending-<uuid>` document in the selected folder
+and deletes it again. A provider that resolves names case-sensitively therefore runs
+on listing, so skip and overwrite answer the same in both modes. IDs are checked
+again on every lookup and every document the app creates. In direct mode the cost of
+an upload no longer depends on how many files the folder holds. Nothing is cached:
+each answer comes from the provider when it is needed. If the measurement fails or a
+later ID breaks the rule, the storage lists the parent folder instead (the 0.2.0
+behaviour, whose cost grows with the folder size; after a mid-run switch the affected
+request fails safely instead of writing). The log names the mode chosen at start:
+`Folder lookups: direct` or `Folder lookups: by listing`. Recovery accepts a journal
+record that names the same file in another case spelling (a record written in one
+mode and read in the other), but only when listing finds exactly one such entry.
 
 `android_server.py` serves at most `MAX_CONNECTIONS = 24` connections at once and
 refuses further ones (logged at most once per 5 seconds). Request bodies use the
@@ -178,7 +208,9 @@ add `--privacy-mode` and supply the complete `http://host:port/token/` URL; this
 also verifies rejection of missing and incorrect tokens on GET and POST routes.
 
 The script checks saved bytes through ADB, including a 12 MiB upload, conflicts,
-traversal rejection, unauthorized requests and aborted replacement. It removes
+a name that differs only in case, the status route, cross-origin refusal, a
+superseded hung upload, traversal rejection, unauthorized requests and aborted
+replacement. It removes
 only its own uniquely named test files. With the Windows emulator, run Windows
 Python when using `adb.exe forward`; its localhost belongs to Windows, not WSL.
 
@@ -189,18 +221,20 @@ install the instrumentation APK using the same external signing configuration:
 timeout 1200 ./gradlew --no-daemon --warning-mode all assembleReleaseAndroidTest
 timeout 30 "$ADB" -s "$DEVICE_SERIAL" install -r app/build/outputs/apk/androidTest/release/app-release-androidTest.apk
 timeout 15 "$ADB" -s "$DEVICE_SERIAL" shell am force-stop at.farfeleder.localupload
-timeout 120 "$ADB" -s "$DEVICE_SERIAL" shell am instrument -w -r at.farfeleder.localupload.test/at.farfeleder.localupload.SafStorageRecoveryCheck
+timeout 600 "$ADB" -s "$DEVICE_SERIAL" shell am instrument -w -r at.farfeleder.localupload.test/at.farfeleder.localupload.SafStorageRecoveryCheck
 ```
 
 Run those commands from `android/`. For a Windows `adb.exe` invoked from WSL,
-pass the APK's Windows path instead. All 13 scenarios must report `PASS` and the
-instrumentation result must contain `failures=0`; `adb`'s exit status alone does
-not indicate test success. The runner creates disposable subfolders in the
+pass the APK's Windows path instead. The 17 scenarios plus a mode check run twice,
+once with the lookup mode the device chooses (which must be direct, or the check
+fails) and once with the listing fallback forced through a package-private test
+constructor. All 36 entries must report `PASS` and the instrumentation result must
+contain `failures=0`; `adb`'s exit status alone does not indicate test success. The runner creates disposable subfolders in the
 persisted tree and exercises the installed app's recovery code. It does not
 simulate hardware power-loss durability or replace physical-device testing.
 
 For the activity-log UI, first upgrade the previous signed APK in place and check
-that its folder grant and Privacy mode setting survive. With **Logs** open, verify
+that its folder grant, Privacy mode and keep-screen-on settings survive. With the log open (**Open log**), verify
 request, upload success, rejection and abort events, then background/reopen the
 activity and stop the server: existing entries must remain. Copy must match the
 log, Clear must empty it, and individual events must not post notifications.

@@ -21,8 +21,8 @@ android {
         applicationId = 'at.farfeleder.localupload'
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = '0.2.0'
+        versionCode = 5
+        versionName = '0.2.1'
         testInstrumentationRunner = 'at.farfeleder.localupload.SafStorageRecoveryCheck'
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
     }

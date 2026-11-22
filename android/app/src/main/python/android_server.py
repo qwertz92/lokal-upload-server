@@ -199,8 +199,12 @@ def _stop_locked():
     _thread = None
 
 
-def start(storage, token, port, log_sink=None):
-    """Validate the chosen SAF tree and listen on all LAN interfaces."""
+def start(storage, token, port, log_sink=None, folder="", device=""):
+    """Validate the chosen SAF tree and listen on all LAN interfaces.
+
+    ``folder`` and ``device`` are readable names for the page (never a content URI
+    or document ID); empty when unknown.
+    """
     global _server, _thread
     if token is not None and (
         not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token)
@@ -208,6 +212,11 @@ def start(storage, token, port, log_sink=None):
         raise ValueError("Invalid URL token")
     with _lifecycle_lock:
         _stop_locked()
+        # Android's shared storage treats names that differ only in case as one file.
+        upload_server.set_case_insensitive(True)
+        folder = str(folder or "")
+        # A content URI would reveal the internal tree address; show nothing instead.
+        upload_server.set_destination("" if "://" in folder else folder, device or "")
         adapter = _SafStorage(storage)
         adapter.initialize()
         httpd = _AndroidHTTPServer(("0.0.0.0", int(port)), adapter, token, log_sink)

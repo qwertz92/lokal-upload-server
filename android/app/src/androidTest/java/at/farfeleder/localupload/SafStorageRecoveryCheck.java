@@ -59,23 +59,31 @@ public final class SafStorageRecoveryCheck extends Instrumentation {
             require(tree != null, "Choose a local SAF destination in the app before running this check.");
             root = DocumentsContract.buildDocumentUriUsingTree(
                 tree, DocumentsContract.getTreeDocumentId(tree));
-            for (String scenario : new String[] {
-                "pending_restart", "backup_rename_gap", "install_rename_gap",
-                "install_recorded_gap", "rollback_pending_gap", "rollback_restore_gap",
-                "restore_recorded_gap", "new_file_install_gap", "new_file_recorded_gap",
-                "missing_pending_after_rollback", "digest_mismatch_retained",
-                "installed_cleanup", "backup_delete_gap"
-            }) {
-                Bundle receipt = new Bundle();
-                receipt.putString("scenario", scenario);
-                try {
-                    scenario(scenario);
-                    receipt.putString("result", "PASS");
-                } catch (Exception | AssertionError error) {
-                    failures++;
-                    receipt.putString("result", "FAIL " + error);
+            // Every scenario runs once with the lookup mode the device selects (which must be
+            // direct here, or the first run would not test it) and once with listing forced.
+            for (boolean listing : new boolean[] {false, true}) {
+                for (String scenario : new String[] {
+                    "mode_decision",
+                    "pending_restart", "backup_rename_gap", "install_rename_gap",
+                    "install_recorded_gap", "rollback_pending_gap", "rollback_restore_gap",
+                    "restore_recorded_gap", "new_file_install_gap", "new_file_recorded_gap",
+                    "missing_pending_after_rollback", "digest_mismatch_retained",
+                    "installed_cleanup", "backup_delete_gap",
+                    "case_replacing_direct_record", "case_replacing_listing_record",
+                    "case_backup_rename_gap", "case_install_recorded_gap"
+                }) {
+                    Bundle receipt = new Bundle();
+                    receipt.putString("scenario", scenario);
+                    receipt.putString("mode", listing ? "listing forced" : "device choice");
+                    try {
+                        scenario(scenario, listing);
+                        receipt.putString("result", "PASS");
+                    } catch (Exception | AssertionError error) {
+                        failures++;
+                        receipt.putString("result", "FAIL " + error);
+                    }
+                    sendStatus(0, receipt);
                 }
-                sendStatus(0, receipt);
             }
             result.putString("stream", "SAF recovery checks: " + failures + " failing scenarios.\n");
         } catch (Exception | AssertionError error) {
@@ -86,7 +94,19 @@ public final class SafStorageRecoveryCheck extends Instrumentation {
         finish(failures == 0 ? Activity.RESULT_OK : Activity.RESULT_CANCELED, result);
     }
 
-    private void scenario(String scenario) throws Exception {
+    private SafStorage storage(boolean listing) {
+        return new SafStorage(context, tree.toString(), listing);
+    }
+
+    private void scenario(String scenario, boolean listing) throws Exception {
+        if (scenario.equals("mode_decision")) {
+            SafStorage storage = storage(listing);
+            storage.validate();
+            require(storage.directLookups() != listing, listing
+                ? "The test switch did not force listing."
+                : "This device chose listing, so the direct-lookup run would test nothing.");
+            return;
+        }
         String directoryName = ".localupload-recovery-check-" + UUID.randomUUID();
         Uri parent = create(root, Document.MIME_TYPE_DIR, directoryName);
         String temporaryName = ".localupload-pending-" + UUID.randomUUID();
@@ -97,19 +117,30 @@ public final class SafStorageRecoveryCheck extends Instrumentation {
         try {
             write(temporary, NEW);
             boolean newFile = scenario.startsWith("new_file");
-            Uri original = newFile ? null : create(parent, "application/octet-stream", "target.bin");
+            // A case scenario keeps the original as "Target.bin" while the upload names "target.bin".
+            boolean caseTarget = scenario.startsWith("case_");
+            Uri original = newFile ? null
+                : create(parent, "application/octet-stream", caseTarget ? "Target.bin" : "target.bin");
             if (original != null) {
                 write(original, OLD);
             }
+            // The URI a direct lookup of "target.bin" returns, whatever the spelling on disk; a
+            // journal record written in direct mode carries this one, in listing mode the other.
+            Uri directTarget = DocumentsContract.buildDocumentUriUsingTree(
+                tree, DocumentsContract.getDocumentId(parent) + "/target.bin");
             Uri recordedTemporary = temporary;
             Uri recordedOld = null;
             String phase = "pending";
             boolean replaced = !newFile && !scenario.equals("pending_restart");
-            if (replaced) {
-                recordedOld = original;
+            if (scenario.startsWith("case_replacing")) {
+                // The replacement was recorded, but the original was not yet renamed to the backup.
+                recordedOld = scenario.equals("case_replacing_direct_record") ? directTarget : original;
+                phase = "replacing";
+            } else if (replaced) {
+                recordedOld = scenario.equals("case_backup_rename_gap") ? directTarget : original;
                 original = rename(original, backupName);
                 phase = "replacing";
-                if (!scenario.equals("backup_rename_gap")) {
+                if (!scenario.endsWith("backup_rename_gap")) {
                     recordedOld = original;
                 }
             }
@@ -158,7 +189,7 @@ public final class SafStorageRecoveryCheck extends Instrumentation {
             require(journal.edit().putString(key, record.toString()).commit(), "Fixture journal write failed.");
             if (scenario.equals("digest_mismatch_retained")) {
                 try {
-                    new SafStorage(context, tree.toString()).validate();
+                    storage(listing).validate();
                     throw new AssertionError("Recovery accepted a different file digest.");
                 } catch (IOException expected) {
                     require(Arrays.equals(read(child(parent, backupName)), OLD), "Backup bytes changed.");
@@ -167,8 +198,8 @@ public final class SafStorageRecoveryCheck extends Instrumentation {
                 }
                 return;
             }
-            new SafStorage(context, tree.toString()).validate();
-            Uri destination = child(parent, "target.bin");
+            storage(listing).validate();
+            Uri destination = caseTarget ? childAnyCase(parent, "target.bin") : child(parent, "target.bin");
             if (newFile) {
                 require(destination == null, "Interrupted new-file upload survived rollback.");
             } else {
@@ -198,6 +229,24 @@ public final class SafStorageRecoveryCheck extends Instrumentation {
             }
             return null;
         }
+    }
+
+    /** The only entry whose name equals {@code name} ignoring ASCII case; two such entries fail. */
+    private Uri childAnyCase(Uri parent, String name) throws IOException {
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(
+            tree, DocumentsContract.getDocumentId(parent));
+        Uri found = null;
+        try (Cursor cursor = resolver.query(children, new String[] {
+                Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+            require(cursor != null, "Fixture folder query failed.");
+            while (cursor.moveToNext()) {
+                if (name.equalsIgnoreCase(cursor.getString(1))) {
+                    require(found == null, "Two case spellings of " + name + " exist side by side.");
+                    found = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(0));
+                }
+            }
+        }
+        return found;
     }
 
     private Uri create(Uri parent, String mime, String name) throws IOException {

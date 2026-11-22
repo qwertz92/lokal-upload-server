@@ -23,6 +23,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -42,8 +43,28 @@ public final class SafStorage {
     private final Uri root;
     private final Map<String, Transaction> pending = new HashMap<>();
     private boolean validated;
+    /*
+     * True while this tree's document IDs are verified to be "<volume>:<path>" strings, as the
+     * Android external-storage provider builds them. A child is then read with one query by its
+     * ID instead of listing the whole parent folder, so the cost of a lookup no longer grows with
+     * the number of files in the folder. Every answer still comes from the provider at the time
+     * of asking; nothing is cached. Any ID that breaks the rule switches this storage back to
+     * listing for the rest of the run. Read and written only while holding LOCK.
+     */
+    private boolean pathIds;
+    /** Test-only: skips the direct lookups so that the listing fallback can be exercised. */
+    private final boolean listingOnly;
 
     public SafStorage(Context context, String treeUri) {
+        this(context, treeUri, false);
+    }
+
+    /**
+     * Package-private so that only this app's own code (the instrumentation check) can force the
+     * listing fallback; nothing reachable through an intent, the server or the UI selects it.
+     */
+    SafStorage(Context context, String treeUri, boolean listingOnly) {
+        this.listingOnly = listingOnly;
         if (treeUri == null) {
             throw new IllegalArgumentException("Choose a local destination folder first.");
         }
@@ -65,6 +86,9 @@ public final class SafStorage {
         synchronized (LOCK) {
             // This provider covers internal shared storage and removable SD cards.
             // Cloud providers may acknowledge buffered writes before they are durable.
+            // This whitelist is also what keeps providers with opaque document IDs away from
+            // the direct lookups: direct() cannot catch a provider that simply echoes whatever
+            // ID it is asked for, so the path rule is only trusted for this one authority.
             if (!"com.android.externalstorage.documents".equals(tree.getAuthority())) {
                 throw new IllegalArgumentException(
                     "Choose an internal-storage or SD-card folder in Android Files. "
@@ -87,6 +111,7 @@ public final class SafStorage {
                     || (directory.flags & Document.FLAG_DIR_SUPPORTS_CREATE) == 0) {
                 throw new IOException("The selected folder does not support creating files.");
             }
+            pathIds = !listingOnly && measureDirectLookups();
             for (Map.Entry<String, ?> entry : journal.getAll().entrySet()) {
                 if (!entry.getKey().startsWith("tx:") || !(entry.getValue() instanceof String)) {
                     continue;
@@ -98,6 +123,13 @@ public final class SafStorage {
                 }
             }
             validated = true;
+        }
+    }
+
+    /** Whether lookups currently go by document ID (true) or by listing the folder (false). */
+    public boolean directLookups() {
+        synchronized (LOCK) {
+            return pathIds;
         }
     }
 
@@ -335,6 +367,194 @@ public final class SafStorage {
     }
 
     private Doc child(Uri parent, String name, Uri identity) throws IOException {
+        if (pathIds) {
+            return identity == null ? direct(parent, name) : directIdentity(parent, identity);
+        }
+        return listed(parent, name, identity);
+    }
+
+    /** The ID a path-based provider gives to {@code name} inside {@code parentId}. */
+    static String childId(String parentId, String name) {
+        return parentId.endsWith(":") ? parentId + name : parentId + "/" + name;
+    }
+
+    static boolean pathBasedRoot(String documentId) {
+        // "primary:", "primary:Download" or "1234-ABCD:DCIM/Camera"; no empty or doubled segment.
+        int colon = documentId.indexOf(':');
+        if (colon <= 0 || documentId.substring(0, colon).indexOf('/') >= 0) {
+            return false;
+        }
+        String path = documentId.substring(colon + 1);
+        return path.isEmpty() || !(path.startsWith("/") || path.endsWith("/") || path.contains("//"));
+    }
+
+    /** Where the last name segment of a path-based ID starts. */
+    private static int nameStart(String documentId) {
+        return Math.max(documentId.lastIndexOf('/'), documentId.indexOf(':')) + 1;
+    }
+
+    /**
+     * Whether two different path-based IDs name the same parent and differ only in the case of
+     * their last segment, as sameName() compares it.
+     */
+    static boolean caseVariantIds(String first, String second) {
+        int start = nameStart(first);
+        return pathBasedRoot(first) && pathBasedRoot(second) && start > 0
+            && start < first.length() && start == nameStart(second)
+            && first.regionMatches(0, second, 0, start) && !first.equals(second)
+            && sameName(first.substring(start), second.substring(start));
+    }
+
+    static boolean hasAsciiLetter(String name) {
+        for (int i = 0; i < name.length(); i++) {
+            char character = name.charAt(i);
+            if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static String swapAsciiCase(String name) {
+        char[] characters = name.toCharArray();
+        for (int i = 0; i < characters.length; i++) {
+            char character = characters[i];
+            if (character >= 'a' && character <= 'z') {
+                characters[i] = (char) (character - 'a' + 'A');
+            } else if (character >= 'A' && character <= 'Z') {
+                characters[i] = (char) (character - 'A' + 'a');
+            }
+        }
+        return new String(characters);
+    }
+
+    /**
+     * Decides once per run whether direct lookups give the answers listing would give. The IDs
+     * must follow the path rule (the root ID looks like one, and every entry of the root folder
+     * carries exactly the ID the rule predicts from its name), a name that cannot exist must come
+     * back as a clean "missing", and an existing entry must be found under its ASCII-case-swapped
+     * spelling, as listing with sameName() would find it. A provider that resolves IDs
+     * case-sensitively (reportedly the lower file system on Android 8 to 10) therefore runs on
+     * listing, so that skip and overwrite answer the same in both modes and two names that differ
+     * only in case are never created side by side. Later lookups and every document this app
+     * creates are checked again as they happen.
+     */
+    private boolean measureDirectLookups() throws IOException {
+        String rootId = DocumentsContract.getDocumentId(root);
+        if (!pathBasedRoot(rootId)) {
+            return false;
+        }
+        String sample = null;
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, rootId);
+        try (Cursor cursor = resolver.query(children, COLUMNS, null, null, null)) {
+            if (cursor == null || cursor.getExtras().getBoolean(DocumentsContract.EXTRA_LOADING)) {
+                return false;
+            }
+            int idColumn = cursor.getColumnIndexOrThrow(Document.COLUMN_DOCUMENT_ID);
+            int nameColumn = cursor.getColumnIndexOrThrow(Document.COLUMN_DISPLAY_NAME);
+            while (cursor.moveToNext()) {
+                String name = cursor.getString(nameColumn);
+                if (name == null || !childId(rootId, name).equals(cursor.getString(idColumn))) {
+                    return false;
+                }
+                if (sample == null && hasAsciiLetter(name)) {
+                    sample = name;
+                }
+            }
+        }
+        pathIds = true;
+        if (lookup(".localupload-absent-" + UUID.randomUUID()) != MISSING) {
+            return false;
+        }
+        if (sample != null) {
+            return lookup(swapAsciiCase(sample)) == FOUND;
+        }
+        // Nothing to compare against: probe with an empty document of this app's own naming and
+        // delete exactly the document the provider returned for it.
+        String probeName = ".localupload-pending-" + UUID.randomUUID();
+        Uri created = DocumentsContract.createDocument(
+            resolver, root, "application/octet-stream", probeName);
+        if (created == null) {
+            throw new IOException("The destination could not create an upload file.");
+        }
+        try {
+            return lookup(swapAsciiCase(probeName)) == FOUND;
+        } finally {
+            delete(created);
+        }
+    }
+
+    private static final int FOUND = 1;
+    private static final int MISSING = 0;
+    private static final int FAILED = -1;
+
+    /** One direct lookup in the root folder during the measurement; any error counts as FAILED. */
+    private int lookup(String name) {
+        try {
+            return direct(root, name) == null ? MISSING : FOUND;
+        } catch (IOException | RuntimeException error) {
+            return FAILED;
+        }
+    }
+
+    private void notPathBased() {
+        // Fall back for the rest of this run; the current operation fails safely instead.
+        pathIds = false;
+    }
+
+    /**
+     * Reads one child by its predicted ID. Shared storage compares names without regard to case,
+     * so this also finds {@code CaseProbe.txt} when asked for {@code caseprobe.txt}; the returned
+     * document then carries the requested spelling, which addresses the same file.
+     */
+    private Doc direct(Uri parent, String name) throws IOException {
+        String expected = childId(DocumentsContract.getDocumentId(parent), name);
+        Doc document = probe(DocumentsContract.buildDocumentUriUsingTree(tree, expected));
+        if (document != null
+                && !expected.equals(DocumentsContract.getDocumentId(document.uri))) {
+            notPathBased();
+            throw new IOException("The provider answered for another document: " + name);
+        }
+        return document;
+    }
+
+    private Doc directIdentity(Uri parent, Uri identity) throws IOException {
+        String parentId = DocumentsContract.getDocumentId(parent);
+        String id = DocumentsContract.getDocumentId(identity);
+        if (!id.startsWith(parentId.endsWith(":") ? parentId : parentId + "/")
+                || id.indexOf('/', parentId.length() + 1) >= 0) {
+            return null;
+        }
+        Doc document = probe(identity);
+        return document != null && id.equals(DocumentsContract.getDocumentId(document.uri))
+            ? document : null;
+    }
+
+    /**
+     * A document query that reports a missing document as null. For a tree URI the platform's
+     * DocumentsProvider first checks that the ID lies inside the tree, and for a file that does
+     * not exist that check fails with an IllegalArgumentException whose message carries the
+     * provider's FileNotFoundException (measured on Android 17). Any other failure stays an error.
+     * A wrong "missing" answer cannot overwrite data: creating or renaming onto an existing name
+     * makes the provider pick another name, which exact() then rejects.
+     */
+    private Doc probe(Uri uri) throws IOException {
+        try (Cursor cursor = resolver.query(uri, COLUMNS, null, null, null)) {
+            return cursor != null && cursor.moveToFirst() ? row(cursor) : null;
+        } catch (IllegalArgumentException error) {
+            if (String.valueOf(error.getMessage()).contains("FileNotFoundException")) {
+                return null;
+            }
+            throw new IOException("The destination document is unavailable.", error);
+        }
+    }
+
+    private static boolean sameName(String requested, String actual) {
+        return requested.equals(actual) || requested.toLowerCase(Locale.ROOT)
+            .equals(actual == null ? null : actual.toLowerCase(Locale.ROOT));
+    }
+
+    private Doc listed(Uri parent, String name, Uri identity) throws IOException {
         Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(
             tree, DocumentsContract.getDocumentId(parent));
         try (Cursor cursor = resolver.query(children, COLUMNS, null, null, null)) {
@@ -344,7 +564,10 @@ public final class SafStorage {
             Doc found = null;
             while (cursor.moveToNext()) {
                 Doc document = row(cursor);
-                if (identity == null ? name.equals(document.name) : identity.equals(document.uri)) {
+                // Shared storage treats names that differ only in case as one file; an identity
+                // recorded by a direct lookup can carry another case spelling of the same entry.
+                if (identity == null ? sameName(name, document.name)
+                        : identity.equals(document.uri) || caseVariant(identity, document.uri)) {
                     if (found != null) {
                         throw new IOException("The provider returned duplicate filename: " + name);
                     }
@@ -353,6 +576,43 @@ public final class SafStorage {
             }
             return found;
         }
+    }
+
+    /** Whether two URIs of this tree carry case-variant path-based IDs (see caseVariantIds). */
+    private boolean caseVariant(Uri first, Uri second) {
+        if (first == null || second == null || !tree.getAuthority().equals(first.getAuthority())
+                || !tree.getAuthority().equals(second.getAuthority())) {
+            return false;
+        }
+        try {
+            String treeId = DocumentsContract.getTreeDocumentId(tree);
+            return treeId.equals(DocumentsContract.getTreeDocumentId(first))
+                && treeId.equals(DocumentsContract.getTreeDocumentId(second))
+                && caseVariantIds(DocumentsContract.getDocumentId(first),
+                    DocumentsContract.getDocumentId(second));
+        } catch (IllegalArgumentException notTreeDocument) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether {@code found}, just looked up in {@code parent}, is the document a journal record
+     * calls {@code recorded}. Equal URIs are. A direct lookup returns the requested spelling and
+     * listing the spelling on disk, so a record written in one mode and read in the other can
+     * name the same entry with another case; that counts only when listing the parent finds
+     * exactly one entry under the name in any spelling (listed() rejects two), so two genuinely
+     * different documents are never taken for one.
+     */
+    private boolean sameDocument(Uri parent, Uri found, Uri recorded) throws IOException {
+        if (found.equals(recorded)) {
+            return true;
+        }
+        if (!caseVariant(found, recorded)) {
+            return false;
+        }
+        String id = DocumentsContract.getDocumentId(found);
+        Doc only = listed(parent, id.substring(nameStart(id)), null);
+        return only != null && (only.uri.equals(found) || caseVariant(only.uri, found));
     }
 
     private Doc read(Uri uri) throws IOException {
@@ -383,6 +643,20 @@ public final class SafStorage {
     }
 
     private void exact(Uri parent, Uri uri, String name) throws IOException {
+        if (pathIds) {
+            // A provider that renamed the document (for example to "name (1)") returns an ID
+            // with that other name; a path-based ID must be exactly the requested one.
+            if (!childId(DocumentsContract.getDocumentId(parent), name)
+                    .equals(DocumentsContract.getDocumentId(uri))) {
+                if (!DocumentsContract.getDocumentId(uri).startsWith(
+                        DocumentsContract.getDocumentId(parent))) {
+                    notPathBased();
+                }
+                throw new IOException("The provider changed the requested filename: " + name);
+            }
+            require(uri);
+            return;
+        }
         Doc document = require(uri);
         Doc located = child(parent, name);
         if (!name.equals(document.name) || located == null || !located.uri.equals(uri)) {
@@ -443,7 +717,9 @@ public final class SafStorage {
                     throw new IOException(recoveryMessage(transaction));
                 }
                 if (!destination.uri.equals(transaction.temporary)) {
-                    if (!recovering) {
+                    // The lookup mode can switch within a run, so the spelling may differ.
+                    if (!recovering && !sameDocument(
+                            transaction.parent, destination.uri, transaction.temporary)) {
                         throw new IOException(recoveryMessage(transaction));
                     }
                     transaction.temporary = destination.uri;
@@ -460,8 +736,8 @@ public final class SafStorage {
             transaction.old = rename(backup.uri, name);
             save(transaction);
             exact(transaction.parent, transaction.old, name);
-        } else if (destination == null || (!destination.uri.equals(transaction.old)
-                && !(recovering && "restoring".equals(transaction.phase)))) {
+        } else if (destination == null || (!(recovering && "restoring".equals(transaction.phase))
+                && !sameDocument(transaction.parent, destination.uri, transaction.old))) {
             throw new IOException(recoveryMessage(transaction));
         } else if (recovering) {
             reconcilePending(transaction);
@@ -477,7 +753,7 @@ public final class SafStorage {
         if (transaction.old != null) {
             Doc backup = child(transaction.parent, transaction.backupName);
             if (backup != null) {
-                if (!backup.uri.equals(transaction.old)) {
+                if (!sameDocument(transaction.parent, backup.uri, transaction.old)) {
                     throw new IOException(recoveryMessage(transaction));
                 }
                 delete(backup.uri);
@@ -489,7 +765,7 @@ public final class SafStorage {
     private void discard(Transaction transaction) throws IOException {
         Doc temporary = child(transaction.parent, null, transaction.temporary);
         if (temporary != null) {
-            if (temporary.name.equals(finalName(transaction))
+            if (sameName(finalName(transaction), temporary.name)
                     && !"installing".equals(transaction.phase)) {
                 // A reused path-based ID must never turn restored old data into a temp.
                 throw new IOException(recoveryMessage(transaction));

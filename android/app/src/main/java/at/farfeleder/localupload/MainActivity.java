@@ -18,7 +18,9 @@ import android.os.Looper;
 import android.os.PersistableBundle;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
-import android.text.method.ScrollingMovementMethod;
+import android.content.res.TypedArray;
+import android.graphics.Typeface;
+import android.util.TypedValue;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
@@ -88,8 +90,6 @@ public final class MainActivity extends Activity {
                 preferences().edit().putBoolean(UploadService.PRIVACY_KEY, checked).apply();
             }
         });
-        status.setMovementMethod(ScrollingMovementMethod.getInstance());
-        address.setMovementMethod(ScrollingMovementMethod.getInstance());
         choose.setOnClickListener(view -> pickFolder());
         open.setOnClickListener(view -> openFolder());
         start.setOnClickListener(view -> requestStart());
@@ -100,7 +100,8 @@ public final class MainActivity extends Activity {
         findViewById(R.id.open_logs).setOnClickListener(view -> startActivity(new Intent(this, LogActivity.class)));
         findViewById(R.id.licenses).setOnClickListener(view -> showLicenses());
         if (Build.VERSION.SDK_INT >= 28) {
-            for (int heading : new int[] {R.id.title, R.id.folder_heading, R.id.server_heading, R.id.address_heading}) {
+            for (int heading : new int[] {R.id.title, R.id.folder_heading, R.id.server_heading,
+                    R.id.address_heading, R.id.activity_heading}) {
                 findViewById(heading).setAccessibilityHeading(true);
             }
         }
@@ -182,8 +183,7 @@ public final class MainActivity extends Activity {
     private void render() {
         UploadService.Snapshot current = UploadService.snapshot();
         String selected = tree();
-        folder.setText(selected == null ? getString(R.string.folder_missing)
-                : DocumentsContract.getTreeDocumentId(Uri.parse(selected)));
+        folder.setText(selected == null ? getString(R.string.folder_missing) : Names.folder(this, selected));
         int message;
         switch (current.state) {
             case UploadService.STARTING: message = R.string.server_starting; break;
@@ -195,7 +195,7 @@ public final class MainActivity extends Activity {
         }
         status.setText(current.state == UploadService.ERROR
                 ? getString(R.string.server_error, current.error) : getString(message));
-        address.setText(current.urls.isEmpty() ? getString(R.string.address_missing) : String.join("\n\n", current.urls));
+        showAddress(current.urls);
         choose.setEnabled(!current.active());
         privacy.setChecked(preferences().getBoolean(UploadService.PRIVACY_KEY, false));
         privacy.setEnabled(!current.active());
@@ -206,6 +206,21 @@ public final class MainActivity extends Activity {
         stop.setEnabled(current.state == UploadService.STARTING || current.state == UploadService.RUNNING);
         copy.setEnabled(!current.urls.isEmpty());
         share.setEnabled(!current.urls.isEmpty());
+    }
+
+    /** The address is the screen's main content while running; the hint without one is plain text. */
+    private void showAddress(List<String> urls) {
+        boolean present = !urls.isEmpty();
+        address.setText(present ? String.join("\n", urls) : getString(R.string.address_missing));
+        address.setTypeface(present ? Typeface.MONOSPACE : Typeface.DEFAULT);
+        address.setTextSize(TypedValue.COMPLEX_UNIT_SP, present ? 20 : 14);
+        TypedArray colors = obtainStyledAttributes(new int[] {
+            present ? android.R.attr.textColorPrimary : android.R.attr.textColorSecondary});
+        try {
+            address.setTextColor(colors.getColorStateList(0));
+        } finally {
+            colors.recycle();
+        }
     }
 
     // The platform picker callback avoids an AndroidX dependency solely for activity results.
