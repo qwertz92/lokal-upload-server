@@ -51,3 +51,6 @@ signing.properties
 *.apk
 *.aab
 artifacts/
+
+# Local agent tooling
+.claude/launch.json
