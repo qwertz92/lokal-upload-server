@@ -920,6 +920,9 @@ class UploadServerTestCase(unittest.TestCase):
             (".upload_tmp_evil.bin", "_.upload_tmp_evil.bin"),
             (".UPLOAD_TMP_Upper.bin", "_.UPLOAD_TMP_Upper.bin"),
             (".Upload_Tmp_dir/inner.bin", "_.Upload_Tmp_dir/inner.bin"),
+            # The Android storage layer's temporary and backup names.
+            (".localupload-pending-1.bin", "_.localupload-pending-1.bin"),
+            (".LOCALUPLOAD-Backup-2.bin", "_.LOCALUPLOAD-Backup-2.bin"),
         )
         old = time.time() - 7200
         for name, expected in cases:
@@ -967,6 +970,206 @@ class UploadServerTestCase(unittest.TestCase):
         self.assertIn("ua=x?[31mred?bell", text)
         self.assertNotIn("\x07", text)
         self.assertNotIn("\x1b[31m", text)
+
+    # -- host names (DNS rebinding) ---------------------------------------------------
+
+    def _reset_host_rules(self):
+        """Isolate the module-level host rule; restored when the test ends."""
+        for name, value in (("_ALLOWED_HOSTS", set()), ("_ALLOW_ANY_HOST", False)):
+            patcher = mock.patch.object(server, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def host_request(self, method, target, host, body=None, headers=None):
+        send = dict(headers or {})
+        if host is not None:
+            send["Host"] = host
+        return self.request_full(method, target, body, send)
+
+    def test_own_and_local_host_names_are_served(self):
+        self._reset_host_rules()
+        names = [
+            "127.0.0.1",
+            f"127.0.0.1:{self.port}",
+            f"[::1]:{self.port}",
+            "localhost",
+            f"localhost:{self.port}",
+            "nodotname",
+            "something.local",
+        ]
+        own = socket.gethostname().split(".")[0]
+        if own.lower() != "localhost":
+            names.append(own + ".fritz.box")
+        for host in names:
+            with self.subTest(host=host):
+                status, _, body = self.host_request("GET", "/", host)
+                self.assertEqual(status, 200, body[:200])
+        # A request without any Host header is not from a browser.
+        sock = self.connect()
+        sock.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        self.assertEqual(read_response(sock)[0], 200)
+
+    def test_foreign_host_names_are_refused_on_every_route_and_nothing_is_stored(self):
+        self._reset_host_rules()
+        payload = pattern(12 * 1024 * 1024, seed=61)
+        for host in ("evil.example", f"evil.example:{self.port}", "127.0.0.1.nip.io"):
+            with self.subTest(host=host):
+                status, headers, body = self.host_request("GET", "/", host)
+                self.assertEqual(status, 403)
+                self.assertIn("text/plain", headers["content-type"])
+                self.assertIn(host.split(":")[0], body.decode())
+                self.assertIn("--allow-host", body.decode())
+                status, _, body = self.host_request(
+                    "GET", "/api/status?upload_id=hostjob001&path=a.bin", host
+                )
+                self.assertEqual(status, 403, body)
+                status, _, body = self.host_request(
+                    "POST", "/api/preflight", host,
+                    json.dumps({"upload_id": "hostjob001", "items": [{"path": "a.bin", "size": 1}]}),
+                    {"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 403, body)
+                self.assertFalse(json.loads(body)["ok"])
+                # A big body must be consumed, or the client sees a reset
+                # instead of the 403.
+                status, _, body = self.host_request(
+                    "POST", "/api/upload?" + self.upload_query("a.bin", "hostjob001"),
+                    host, payload,
+                )
+                self.assertEqual(status, 403, body)
+                self.assertFalse(json.loads(body)["ok"])
+        self.assertEqual(list(self.upload_root.rglob("*")), [])
+        self.assertEqual(self.log_lines("START"), [])
+        self.assertEqual(self.log_lines("Preflight:"), [])
+
+    def test_allow_hosts_admits_a_name_or_every_name(self):
+        self._reset_host_rules()
+        self.assertEqual(self.host_request("GET", "/", "evil.example")[0], 403)
+        server.allow_hosts(["Evil.Example."])
+        self.assertEqual(self.host_request("GET", "/", "evil.example")[0], 200)
+        self.assertEqual(self.host_request("GET", "/", f"evil.example:{self.port}")[0], 200)
+        self.assertEqual(self.host_request("GET", "/", "other.example")[0], 403)
+        server.allow_hosts(["*"])
+        self.assertEqual(self.host_request("GET", "/", "other.example")[0], 200)
+
+    def test_matching_origin_does_not_rescue_a_repointed_domain(self):
+        self._reset_host_rules()
+        host = f"evil.example:{self.port}"
+        status, _, body = self.host_request(
+            "POST", "/api/upload?" + self.upload_query("rebind.bin", "rebindjob01"),
+            host, b"payload", {"Origin": f"http://{host}"},
+        )
+        self.assertEqual(status, 403, body)
+        self.assertFalse((self.upload_root / "rebind.bin").exists())
+
+    def test_unknown_host_is_answered_before_the_token_in_private_mode(self):
+        self._reset_host_rules()
+        self.httpd.token = b"secrettok"
+        self.addCleanup(setattr, self.httpd, "token", None)
+        answers = set()
+        for prefix in ("/secrettok/", "/wrongtok/", "/"):
+            status, _, body = self.host_request("GET", prefix, "evil.example")
+            self.assertEqual(status, 403, prefix)
+            answers.add(body)
+        self.assertEqual(len(answers), 1, "the answer depends on the token")
+        # With the right token the POST routes refuse the host as well.
+        status, _, body = self.host_request(
+            "POST", "/secrettok/api/preflight", "evil.example", b"{}"
+        )
+        self.assertEqual(status, 403, body)
+
+    def test_unknown_host_in_the_log_carries_no_control_characters(self):
+        self._reset_host_rules()
+
+        class RealLogHandler(server.SimpleUploadServer):
+            timeout = 5
+
+        httpd = server._UploadHTTPServer(("127.0.0.1", 0), RealLogHandler)
+        httpd.state = server._ServerState()
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        captured = io.StringIO()
+        original = sys.stdout
+        self.addCleanup(setattr, sys, "stdout", original)
+        sys.stdout = captured
+        try:
+            sock = socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=10)
+            try:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: evil\x07\x1b[31m.example\r\n\r\n")
+                status, _, body = read_response(sock)
+            finally:
+                sock.close()
+        finally:
+            sys.stdout = original
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(5)
+        self.assertEqual(status, 403)
+        self.assertNotIn(b"\x07", body)
+        self.assertNotIn(b"\x1b", body)
+        text = captured.getvalue()
+        self.assertIn("reason=unknown_host host=evil??[31m.example", text)
+        self.assertNotIn("\x07", text)
+        self.assertNotIn("\x1b[31m", text)
+
+    # -- destination text on the page ----------------------------------------------------
+
+    def _restore_destination(self):
+        previous = dict(server._DESTINATION)
+        self.addCleanup(server._DESTINATION.update, previous)
+
+    @staticmethod
+    def _js_literal(page, name):
+        import re
+
+        match = re.search(rb"const " + name + rb" = (.*);\n", page)
+        assert match, name
+        return json.loads(match.group(1).decode("utf-8"))
+
+    def test_destination_text_cannot_break_out_of_the_script(self):
+        self._restore_destination()
+        server.set_destination("", "")
+        _, empty_page = self.request("GET", "/")
+        self.assertNotIn(b"__DESTINATION_", empty_page)
+        self.assertEqual(self._js_literal(empty_page, b"DESTINATION_FOLDER"), "")
+        self.assertEqual(self._js_literal(empty_page, b"DESTINATION_DEVICE"), "")
+
+        server.set_destination(
+            "up</script><img src=x onerror=alert(1)>", 'PC\x1b[31m "quoted"'
+        )
+        status, page = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(page.count(b"</script>"), empty_page.count(b"</script>"))
+        self.assertNotIn(b"<img src=x", page)
+        self.assertNotIn(b"\x1b", page)
+        self.assertEqual(
+            self._js_literal(page, b"DESTINATION_FOLDER"),
+            "up</script><img src=x onerror=alert(1)>",
+        )
+        self.assertEqual(self._js_literal(page, b"DESTINATION_DEVICE"), 'PC [31m "quoted"')
+
+        # Characters that reverse the writing direction would mirror the
+        # sentence the name is placed in.
+        server.set_destination("ab‮cd", "x⁦y‏z")
+        _, page = self.request("GET", "/")
+        self.assertEqual(self._js_literal(page, b"DESTINATION_FOLDER"), "abcd")
+        self.assertEqual(self._js_literal(page, b"DESTINATION_DEVICE"), "xyz")
+
+        server.set_destination("x" * 500, "y" * 500)
+        _, page = self.request("GET", "/")
+        self.assertEqual(len(self._js_literal(page, b"DESTINATION_FOLDER")), 120)
+        self.assertEqual(len(self._js_literal(page, b"DESTINATION_DEVICE")), 80)
+
+    # -- both languages ship in the page ---------------------------------------------------
+
+    def test_page_ships_both_languages_and_the_switch(self):
+        status, page = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(page.count(b"'btn.chooseFiles':"), 2)
+        self.assertIn(b"'btn.chooseFiles': 'Choose files'", page)
+        self.assertIn("'btn.chooseFiles': 'Dateien auswählen'".encode("utf-8"), page)
+        self.assertIn(b"get('lang')", page)
+        self.assertIn(b"?lang=de", page)
 
     # -- several retries of one tab ------------------------------------------
 
@@ -1191,6 +1394,33 @@ class ServerStateTestCase(unittest.TestCase):
         self.assertEqual(owners, recent)
 
 
+class ReservationAndCounterTestCase(unittest.TestCase):
+    def test_a_path_reserved_twice_by_one_job_stays_reserved_until_both_release(self):
+        state = server._ServerState()
+        self.assertTrue(state.reserve_path("p.bin", "jobaaaaaa1"))
+        self.assertTrue(state.reserve_path("p.bin", "jobaaaaaa1"))
+        # A job that does not hold the path cannot release it.
+        state.release_path("p.bin", "jobbbbbbb2")
+        self.assertTrue(state.is_path_reserved("p.bin"))
+        state.release_path("p.bin", "jobaaaaaa1")
+        self.assertFalse(state.reserve_path("p.bin", "jobbbbbbb2"))
+        self.assertTrue(state.is_path_reserved("p.bin"))
+        self.assertFalse(state.is_path_reserved("p.bin", exclude_upload_id="jobaaaaaa1"))
+        state.release_path("p.bin", "jobaaaaaa1")
+        self.assertFalse(state.is_path_reserved("p.bin"))
+        self.assertTrue(state.reserve_path("p.bin", "jobbbbbbb2"))
+
+    def test_storing_a_path_again_replaces_its_bytes_in_the_job_total(self):
+        state = server._ServerState()
+        state.upsert_session("jobaaaaaa1", client_ip="10.0.0.1", total_files=2, total_bytes=100)
+        state.bump_done("jobaaaaaa1", "p.bin", bytes_written=10, digest="d1")
+        files, _, _ = state.bump_done("jobaaaaaa1", "p.bin", bytes_written=30, digest="d2")
+        session = state.get_session("jobaaaaaa1")
+        self.assertEqual(files, 1)
+        self.assertEqual(session["files_done"], 1)
+        self.assertEqual(session["bytes_done"], 30)
+
+
 class TempFileSweepTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_directory = tempfile.TemporaryDirectory()
@@ -1257,13 +1487,12 @@ class CaseSensitivityTestCase(unittest.TestCase):
             self.assertEqual([p.name for p in folder.iterdir()], ["Marker.txt"])
 
     def test_measured_case_rule_decides_path_keys_and_the_page(self):
+        self.addCleanup(server.set_case_insensitive, server._CASE_INSENSITIVE)
         for flag, needle in ((True, "= true;"), (False, "= false;")):
-            with mock.patch.object(server, "_CASE_INSENSITIVE", flag):
-                same = server._path_key("Dir/A.TXT") == server._path_key("dir/a.txt")
-                self.assertEqual(same, flag)
-                self.assertIn(
-                    "const CASE_INSENSITIVE_FS " + needle, server._render_html()
-                )
+            server.set_case_insensitive(flag)
+            same = server._path_key("Dir/A.TXT") == server._path_key("dir/a.txt")
+            self.assertEqual(same, flag)
+            self.assertIn("const CASE_INSENSITIVE_FS " + needle, server._render_html())
 
 
 if __name__ == "__main__":

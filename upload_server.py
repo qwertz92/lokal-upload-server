@@ -24,6 +24,7 @@ import datetime as _dt
 import errno
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import platform
@@ -68,8 +69,14 @@ SESSION_TTL_SEC = 12 * 3600
 # Stored files remembered for /api/status, across all jobs.
 RECENT_DONE_LIMIT = 4096
 TEMP_PREFIX = ".upload_tmp_"
+# Lower-case beginnings of names that belong to the server: its own temporary
+# files and those of the Android app's storage layer. An uploaded file never
+# gets such a name.
+_RESERVED_PREFIXES = (TEMP_PREFIX, ".localupload-")
 # Control characters, including ESC, which starts terminal escape sequences.
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Characters that change the writing direction of the text after them.
+_BIDI_RE = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 MAX_NAME_BYTES = 255
 # Upper bound for draining the body of a rejected request so the client can
 # still read the status code. Beyond this the connection is simply closed.
@@ -244,9 +251,9 @@ def _sanitize_rel_path(raw: str) -> str:
         if part == "..":
             raise ValueError("Invalid path (..)")
         part = _sanitize_name_part(part)
-        # Names with this prefix are the server's own temporary files, which
-        # the start-up sweep deletes; a user's file must not look like one.
-        if part.lower().startswith(TEMP_PREFIX):
+        # Names with these prefixes are the server's own temporary files, which
+        # it renames and deletes; a user's file must not look like one.
+        if part.lower().startswith(_RESERVED_PREFIXES):
             part = "_" + part
         # 255 is the limit per name on NTFS (characters) and on ext4, APFS and
         # most others (bytes); checking bytes satisfies both.
@@ -267,6 +274,87 @@ _CASE_INSENSITIVE = os.name == "nt"
 
 def _path_key(rel_path: str) -> str:
     return rel_path.lower() if _CASE_INSENSITIVE else rel_path
+
+
+def set_case_insensitive(flag: bool) -> None:
+    """Tell the server how its storage compares names.
+
+    run_server() measures this for a folder on disk. A caller with another
+    kind of storage (the Android app) states it instead.
+    """
+    global _CASE_INSENSITIVE
+    _CASE_INSENSITIVE = bool(flag)
+
+
+# Host names accepted besides the ones _host_allowed() recognises by itself.
+_ALLOWED_HOSTS: set = set()
+_ALLOW_ANY_HOST = False
+
+
+def allow_hosts(names) -> None:
+    """Accept requests addressed to these names; ``*`` accepts every name."""
+    global _ALLOW_ANY_HOST
+    for name in names:
+        name = str(name).strip().lower().rstrip(".")
+        if name == "*":
+            _ALLOW_ANY_HOST = True
+        elif name:
+            _ALLOWED_HOSTS.add(name)
+
+
+def _host_allowed(header: str | None) -> bool:
+    """False for a name that an outside website could have pointed here.
+
+    A page on the internet cannot read from or post to an address in the
+    local network, but it can use a domain of its own and re-point that
+    domain at this server's address afterwards. Its requests then look local
+    in every respect except one: the browser still sends the domain as Host.
+    An IP address, ``localhost``, a name without a dot, a ``.local`` name and
+    this computer's own name cannot be such a domain. Anything else needs
+    ``--allow-host``. A program that sends no Host is not a browser.
+    """
+    if _ALLOW_ANY_HOST or not header:
+        return True
+    host = header.strip().lower()
+    if host.startswith("["):
+        host = host[1:].partition("]")[0]
+    elif host.count(":") == 1:
+        host = host.partition(":")[0]
+    host = host.rstrip(".")
+    try:
+        ipaddress.ip_address(host.partition("%")[0])
+        return True
+    except ValueError:
+        pass
+    if not host or "." not in host or host in _ALLOWED_HOSTS:
+        return True
+    if host.endswith((".local", ".localhost")):
+        return True
+    try:
+        own = socket.gethostname().split(".")[0].lower()
+    except OSError:
+        own = ""
+    return bool(own) and own != "localhost" and host.split(".")[0] == own
+
+
+# Shown on the page so that a sender sees where the files will end up.
+_DESTINATION = {"folder": "", "device": ""}
+
+
+_DESTINATION_PLACEHOLDERS = {
+    "__DESTINATION_FOLDER__": "folder",
+    "__DESTINATION_DEVICE__": "device",
+}
+
+
+def set_destination(folder: str, device: str) -> None:
+    """Name the receiving folder and device for the page; both may be empty."""
+    def clean(text: str, limit: int) -> str:
+        text = _BIDI_RE.sub("", _CONTROL_RE.sub(" ", str(text or "")))
+        return text.strip()[:limit]
+
+    _DESTINATION["folder"] = clean(folder, 120)
+    _DESTINATION["device"] = clean(device, 80)
 
 
 def _probe_case_insensitive(folder: Path) -> bool:
@@ -309,7 +397,8 @@ class _ServerState:
         self._seen_clients: set[str] = set()
         self._sessions: dict[str, dict] = {}
         self._active: dict[str, list[_ActiveUpload]] = {}
-        self._reserved_paths: dict[str, str] = {}
+        # path -> [job id, number of running requests of that job writing it]
+        self._reserved_paths: dict[str, list] = {}
         self._recent_done: OrderedDict = OrderedDict()
         # Which job stored each remembered path last.
         self._done_owner: dict[str, str] = {}
@@ -451,7 +540,8 @@ class _ServerState:
         with self._lock:
             # A file is stored again when its first answer got lost on the way
             # back and the browser retried. That must not count twice.
-            repeated = key in self._recent_done
+            previous = self._recent_done.get(key)
+            repeated = previous is not None
             # The job that stored a path last owns what is on disk. An earlier
             # job keeps its entry, so that a repeat of it still counts once,
             # but lookup_done() no longer reports it.
@@ -465,7 +555,9 @@ class _ServerState:
             session = self._sessions.get(upload_id)
             if not session:
                 return (0, 0, 0)
-            if not repeated:
+            if repeated:
+                session["bytes_done"] += bytes_written - previous[0]
+            else:
                 session["files_done"] += 1
                 session["bytes_done"] += bytes_written
             return (
@@ -499,28 +591,36 @@ class _ServerState:
     ) -> bool:
         key = _path_key(rel_path)
         with self._lock:
-            owner = self._reserved_paths.get(key)
-            if not owner:
+            held = self._reserved_paths.get(key)
+            if not held:
                 return False
-            if exclude_upload_id and owner == exclude_upload_id:
+            if exclude_upload_id and held[0] == exclude_upload_id:
                 return False
             return True
 
     def reserve_path(self, rel_path: str, upload_id: str) -> bool:
         key = _path_key(rel_path)
         with self._lock:
-            owner = self._reserved_paths.get(key)
-            if owner and owner != upload_id:
+            held = self._reserved_paths.get(key)
+            if held and held[0] != upload_id:
                 return False
-            self._reserved_paths[key] = upload_id
+            # Two requests of one job can write the same path for a moment (a
+            # retry that came in over another address). Each holds its own
+            # share, so the first to end does not free the path for strangers.
+            if held:
+                held[1] += 1
+            else:
+                self._reserved_paths[key] = [upload_id, 1]
             return True
 
     def release_path(self, rel_path: str, upload_id: str) -> None:
         key = _path_key(rel_path)
         with self._lock:
-            owner = self._reserved_paths.get(key)
-            if owner == upload_id:
-                self._reserved_paths.pop(key, None)
+            held = self._reserved_paths.get(key)
+            if held and held[0] == upload_id:
+                held[1] -= 1
+                if held[1] <= 0:
+                    self._reserved_paths.pop(key, None)
 
 
 STATE = _ServerState()
@@ -548,6 +648,12 @@ def _render_html() -> str:
         "__CASE_INSENSITIVE_FS__",
         "true" if _path_key("A") == _path_key("a") else "false",
     )
+    for placeholder, key in _DESTINATION_PLACEHOLDERS.items():
+        # A JSON string is a JavaScript string; "<" is escaped so that no
+        # folder name can end the script element.
+        html = html.replace(
+            placeholder, json.dumps(_DESTINATION[key]).replace("<", "\\u003c")
+        )
     return html
 
 
@@ -806,6 +912,25 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         except ValueError:
             return False
 
+    def _refuse_unknown_host(self) -> bool:
+        """Log an unknown Host name; True when the request must be refused."""
+        header = self.headers.get("Host")
+        if _host_allowed(header):
+            return False
+        self._log(
+            f"Request refused: ip={self._client_ip()} status=403 "
+            f"reason=unknown_host host={(header or '')[:80]}",
+            color=_ANSI_YELLOW,
+        )
+        return True
+
+    def _unknown_host_message(self) -> str:
+        name = _CONTROL_RE.sub("?", self.headers.get("Host") or "")[:80]
+        return (
+            f"This server does not answer under the name {name!r}. Open it by "
+            "its IP address, or start it with --allow-host and that name."
+        )
+
     def _valid_target(self) -> bool:
         """Answer 400 for a request target that cannot be parsed as a URL."""
         try:
@@ -817,7 +942,16 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:
-        if not self._valid_target() or not self._authorize():
+        if not self._valid_target():
+            return
+        if self._refuse_unknown_host():
+            self._send_bytes(
+                403,
+                self._unknown_host_message().encode("utf-8"),
+                "text/plain; charset=utf-8",
+            )
+            return
+        if not self._authorize():
             return
         self._note_client()
         parsed = urlparse(self.path)
@@ -847,6 +981,10 @@ class SimpleUploadServer(BaseHTTPRequestHandler):
                 f"Request: ip={self._client_ip()} method=POST route=other status=404"
             )
             self._send_json(404, {"ok": False, "error": "not_found"})
+            return
+        if self._refuse_unknown_host():
+            self._discard_request_body()
+            self._send_json(403, {"ok": False, "error": self._unknown_host_message()})
             return
         if not self._same_origin():
             self._log(
@@ -1286,7 +1424,19 @@ _HTML_TEMPLATE = r"""<!doctype html>
       .btn.danger:hover { background: rgba(239, 68, 68, .18); }
     }
     /* Fingers need a larger target than a mouse pointer. */
-    @media (pointer: coarse) { .btn { min-height: 44px; } }
+    @media (pointer: coarse) { .btn { min-height: 44px; min-width: 44px; } }
+    /* A display rule on a class would otherwise win over the hidden attribute. */
+    [hidden] { display: none !important; }
+    .dest { font-weight: 650; color: var(--text); overflow-wrap: anywhere; }
+    /* The row keeps its height whether or not "Clear finished" is shown. */
+    .queueHead {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      min-height: 34px;
+    }
+    @media (pointer: coarse) { .queueHead { min-height: 44px; } }
     :focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }
     .btn.secondary.mode-selected {
       background: rgba(34, 197, 94, .18);
@@ -1373,8 +1523,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
       .qactions { justify-content: flex-start; flex-wrap: wrap; }
     }
 
-    /* Always-visible overall progress. Height is constant in every state
-       (idle and uploading render the same three rows) so nothing shifts. */
+    /* Overall progress, shown from the first queued job on. Its height is
+       constant in every state (idle and uploading render the same three rows)
+       so nothing shifts. */
     .statusbar {
       position: sticky;
       top: 0;
@@ -1522,8 +1673,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
     }
     .modal.show { display: flex; }
     .modalCard {
-      width: min(840px, 100%);
-      height: min(80vh, 760px);
+      --row-h: 36px;
+      width: min(640px, 100%);
+      max-height: min(100%, 760px);
       overflow: hidden;
       border-radius: 14px;
       border: 1px solid var(--border);
@@ -1535,51 +1687,99 @@ _HTML_TEMPLATE = r"""<!doctype html>
       gap: 10px;
     }
     .modalCard.expanded {
-      width: min(1120px, 98vw);
-      height: min(92vh, 900px);
+      width: min(1120px, 100%);
+      max-height: min(100%, 900px);
     }
-    #conflictText { min-height: 18px; }
-    .confControls {
+    @media (pointer: coarse) { .modalCard { --row-h: 44px; } }
+    .confTitle {
+      margin: 0;
+      flex: 0 0 auto;
+      font-size: 18px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+    /* Title and buttons stay put; whatever does not fit scrolls in between. */
+    .confBody {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
       display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+      flex-direction: column;
+      gap: 10px;
     }
+    .confBody > * { flex: 0 0 auto; }
+    .confText { margin: 0; line-height: 1.4; }
+    .confAll {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 32px;
+      font-size: 14px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .confAll input, .confRow input { width: 20px; height: 20px; margin: 0; }
     .btn.small {
       padding: 7px 10px;
       font-size: 12px;
       font-weight: 600;
     }
-    .confControls .btn.small {
-      min-width: 170px;
-      flex: 1 1 170px;
-      text-align: center;
-      justify-content: center;
+    .btn.primary {
+      background: #22c55e;
+      border-color: #22c55e;
+      color: #04130a;
     }
+    @media (hover: hover) and (pointer: fine) {
+      .btn.primary:hover { background: #4ade80; border-color: #4ade80; }
+    }
+    .confButtons {
+      flex: 0 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .confButtons .btn { flex: 1 1 140px; }
+    .confMore {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(255,255,255,.02);
+    }
+    .confMore > summary {
+      cursor: pointer;
+      padding: 9px 12px;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    @media (pointer: coarse) { .confMore > summary { padding: 14px 12px; } }
+    /* Capped, so that opening it never squeezes the file list: the list is
+       what the dialog is for. */
+    .confMoreBody {
+      padding: 0 12px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: min(34vh, 260px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .confControls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .confControls .btn.small { text-align: center; justify-content: center; }
     .confControls .btn.small.mode-hidden {
       background: rgba(239, 68, 68, .16);
       border-color: rgba(239, 68, 68, .45);
-    }
-    .confList {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: rgba(255,255,255,.03);
-      overflow: auto;
-      padding: 10px;
-      min-height: 0;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .confList div { margin: 4px 0; }
-    .confTools {
-      display: grid;
-      grid-template-rows: auto auto auto;
-      gap: 6px;
-      min-height: 0;
     }
     .confScopeRow {
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: var(--muted);
     }
     .confScopeSelect {
       border: 1px solid var(--border);
@@ -1587,13 +1787,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
       background: rgba(16,25,43,.98);
       color: var(--text);
       padding: 6px 8px;
-    }
-    .confSplit {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
+      font-size: 13px;
     }
     .confFilter {
       width: 100%;
@@ -1602,14 +1796,17 @@ _HTML_TEMPLATE = r"""<!doctype html>
       border: 1px solid var(--border);
       background: rgba(255,255,255,.04);
       color: var(--text);
-      outline: none;
+      font-size: 13px;
     }
     .confFilter::placeholder { color: var(--muted); }
+    /* 16px keeps iOS from zooming the page when a field gets focus. */
+    @media (pointer: coarse) {
+      .confFilter, .confScopeSelect { font-size: 16px; min-height: 44px; }
+    }
     .confFilterMeta {
       color: var(--muted);
       font-size: 12px;
       line-height: 1.35;
-      min-height: 16px;
       white-space: normal;
       overflow-wrap: anywhere;
       margin: 0;
@@ -1618,23 +1815,19 @@ _HTML_TEMPLATE = r"""<!doctype html>
       display: flex;
       flex-direction: column;
       gap: 4px;
-      flex: 1;
-      min-height: 0;
     }
     .confFolderSection.collapsed { display: none; }
     .confFolderList {
       border: 1px solid var(--border);
       border-radius: 10px;
       background: rgba(255,255,255,.03);
-      min-height: 0;
-      max-height: none;
+      max-height: 120px;
       overflow: auto;
       padding: 4px;
       display: grid;
       gap: 3px;
       align-content: start;
       font-size: 13px;
-      flex: 1;
     }
     .confFolderRow {
       display: grid;
@@ -1654,12 +1847,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
       background: rgba(245, 158, 11, .14);
       border-color: rgba(245, 158, 11, .44);
     }
-    .confFolderName {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      line-height: 1.2;
-    }
+    .confFolderName { overflow-wrap: anywhere; line-height: 1.25; }
     .confFolderSelect {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1668,49 +1856,66 @@ _HTML_TEMPLATE = r"""<!doctype html>
       padding: 3px 6px;
       line-height: 1.2;
     }
-    .confFileSection {
-      flex: 1;
-      min-height: 0;
+    @media (pointer: coarse) { .confFolderSelect { min-height: 44px; font-size: 16px; } }
+    /* The list gives way when the dialog is short, but never below three
+       rows (or fewer when there are fewer): --n is the number of rows shown. */
+    .confBody > .confFileSection {
+      flex: 1 1 auto;
       display: flex;
+      min-height: calc(min(var(--n, 3), 3) * var(--row-h) + 24px);
     }
-    .confFileSection.collapsed { display: none; }
-    .confFileSection .confList {
-      width: 100%;
-      height: 100%;
+    .confBody > .confFileSection.collapsed { display: none; }
+    .confList {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(255,255,255,.03);
+      overflow: auto;
+      overscroll-behavior: contain;
+      padding: 6px;
+      font-size: 14px;
     }
     .confRow {
       display: grid;
-      grid-template-columns: 18px 1fr auto;
-      gap: 8px;
+      grid-template-columns: 20px minmax(0, 1fr) auto;
+      gap: 10px;
       align-items: center;
-      padding: 4px 6px;
+      min-height: var(--row-h);
+      padding: 4px 8px;
+      margin: 0 0 2px;
       border-radius: 8px;
+      cursor: pointer;
     }
-    .confRow input { margin: 0; }
+    .confRow.locked { cursor: default; }
+    .confName { overflow-wrap: anywhere; line-height: 1.25; }
+    .confTag { color: var(--muted); font-size: 12px; white-space: nowrap; }
     .confRow.overwrite { background: rgba(34,197,94,.10); }
+    .confRow.overwrite .confTag { color: rgba(34,197,94,.95); }
     .confRow.skip { background: rgba(255,255,255,.02); }
     .confSummary { color: var(--muted); font-size: 13px; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Local Upload Server</h1>
-    <div class="hint">Files you add are stored on the device that runs this server.
-      They upload one after another, and a lost connection is retried by itself.</div>
+    <h1 data-i18n="app.title">Local Upload Server</h1>
+    <div class="hint"><span id="introDest"></span> <span id="introMore"></span></div>
 
     <div class="dropzone" id="dropZone">
       <div class="dropActions">
-        <button class="btn" id="pickFilesBtn" type="button">Choose files</button>
-        <button class="btn secondary" id="pickFolderBtn" type="button">Choose a folder</button>
+        <button class="btn" id="pickFilesBtn" type="button" data-i18n="btn.chooseFiles">Choose files</button>
+        <button class="btn secondary" id="pickFolderBtn" type="button" data-i18n="btn.chooseFolder">Choose a folder</button>
       </div>
-      <div class="dropHint">or drop files and folders anywhere on this page</div>
+      <div class="dropHint" data-i18n="drop.hint">or drop files and folders anywhere on this page</div>
       <input class="visually-hidden" type="file" id="singleFile" multiple
              tabindex="-1" aria-hidden="true" />
       <input class="visually-hidden" type="file" id="folderInput" webkitdirectory directory multiple
              tabindex="-1" aria-hidden="true" />
     </div>
 
-    <div class="statusbar" id="statusBar">
+    <!-- Hidden until the first job is queued: before that it only says "idle". -->
+    <div class="statusbar" id="statusBar" hidden>
       <div class="statusMain">
         <div class="statusHead">
           <span class="statusTitle" id="statusTitle">Idle</span>
@@ -1718,13 +1923,14 @@ _HTML_TEMPLATE = r"""<!doctype html>
         </div>
         <div class="progress" id="overallProgress" role="progressbar"
              aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-             aria-label="Overall upload progress" aria-describedby="overallStats">
+             data-i18n-aria-label="status.aria" aria-label="Overall upload progress"
+             aria-describedby="overallStats">
           <div class="bar" id="overallBar"></div>
         </div>
         <div class="statusStats mono" id="overallStats">Nothing queued.</div>
       </div>
       <div class="statusActions">
-        <button class="btn danger" id="abortBtn" type="button" disabled>Abort</button>
+        <button class="btn danger" id="abortBtn" type="button" disabled data-i18n="btn.abort">Abort job</button>
       </div>
     </div>
     <!-- A progressbar role does not announce its own updates, so milestones
@@ -1733,57 +1939,61 @@ _HTML_TEMPLATE = r"""<!doctype html>
        aria-live="polite" aria-atomic="true"></p>
 
     <div class="card" style="margin-top:14px;">
-      <div class="row" style="margin-top:0; justify-content:space-between;">
-        <h2 style="margin:0;">Queue</h2>
-        <button class="btn secondary small" id="clearDoneBtn" type="button">Clear finished</button>
+      <div class="queueHead">
+        <h2 style="margin:0;" data-i18n="queue.title">Queue</h2>
+        <button class="btn secondary small" id="clearDoneBtn" type="button" hidden data-i18n="btn.clearDone">Clear finished</button>
       </div>
-      <div class="hint" id="queueEmpty">No uploads yet.</div>
+      <div class="hint" id="queueEmpty" data-i18n="queue.empty">No uploads yet.</div>
       <div class="meta error" id="pageError" role="alert" style="display:none;"></div>
-      <ul class="queue" id="queueList"></ul>
+      <ul class="queue" id="queueList" data-i18n-aria-label="queue.aria" aria-label="Upload queue"></ul>
     </div>
   </div>
 
   <div class="modal" id="conflictModal" aria-hidden="true">
-    <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="conflictTitle">
-      <div class="qtitle" id="conflictTitle">Existing files detected</div>
-      <div class="hint" id="conflictText"></div>
-      <div class="row">
-        <label class="qsub mono" style="display:flex; align-items:center; gap:8px;">
+    <div class="modalCard" role="dialog" aria-modal="true"
+         aria-labelledby="conflictTitle" aria-describedby="conflictText">
+      <h2 class="confTitle" id="conflictTitle"></h2>
+      <div class="confBody">
+        <p class="hint confText" id="conflictText"></p>
+        <label class="confAll">
           <input type="checkbox" id="conflictAll" />
-          Overwrite all
+          <span id="conflictAllLabel" data-i18n="dlg.replaceAll">Replace all</span>
         </label>
-      </div>
-      <div class="confControls">
-        <button class="btn secondary small" id="toggleFolderBtn" type="button">Hide folder view</button>
-        <button class="btn secondary small" id="toggleFileBtn" type="button">Hide file view</button>
-        <button class="btn secondary small" id="selectionFilterBtn" type="button">Selection: all</button>
-        <button class="btn secondary small" id="toggleSizeBtn" type="button">Larger size</button>
-      </div>
-      <div class="confTools">
-        <div class="confScopeRow">
-          <label class="qsub mono" for="conflictScope">Search scope</label>
-          <select class="confScopeSelect mono" id="conflictScope">
-            <option value="files" selected>files</option>
-            <option value="folders">folders</option>
-            <option value="both">both</option>
-          </select>
-        </div>
-        <input class="confFilter mono" id="conflictFilter" type="text" placeholder="Filter by path..." />
-        <div class="confFilterMeta mono" id="conflictFilterMeta"></div>
-      </div>
-      <div class="confSplit">
-        <div class="confFolderSection" id="conflictFolderSection">
-          <div class="confFilterMeta mono" id="conflictFolderMeta"></div>
-          <div class="confFolderList mono" id="conflictFolderList"></div>
-        </div>
         <div class="confFileSection" id="conflictFileSection">
-          <div class="confList mono" id="conflictList"></div>
+          <div class="confList" id="conflictList"></div>
         </div>
+        <div class="confSummary" id="conflictSummary" aria-live="polite"></div>
+        <details class="confMore" id="conflictMore">
+          <summary data-i18n="dlg.more">Filter and folder rules</summary>
+          <div class="confMoreBody">
+            <div class="confControls">
+              <button class="btn secondary small" id="toggleFolderBtn" type="button"></button>
+              <button class="btn secondary small" id="toggleFileBtn" type="button"></button>
+              <button class="btn secondary small" id="selectionFilterBtn" type="button"></button>
+              <button class="btn secondary small" id="toggleSizeBtn" type="button"></button>
+            </div>
+            <div class="confScopeRow">
+              <label for="conflictScope" data-i18n="dlg.scope.label">Search in</label>
+              <select class="confScopeSelect" id="conflictScope">
+                <option value="files" selected data-i18n="dlg.scope.files">file names</option>
+                <option value="folders" data-i18n="dlg.scope.folders">folder names</option>
+                <option value="both" data-i18n="dlg.scope.both">both</option>
+              </select>
+            </div>
+            <input class="confFilter" id="conflictFilter" type="text"
+                   data-i18n-placeholder="dlg.filter.ph" placeholder="Filter by path…"
+                   data-i18n-aria-label="dlg.filter.ph" aria-label="Filter by path…" />
+            <div class="confFilterMeta" id="conflictFilterMeta"></div>
+            <div class="confFolderSection" id="conflictFolderSection">
+              <div class="confFilterMeta" id="conflictFolderMeta"></div>
+              <div class="confFolderList" id="conflictFolderList"></div>
+            </div>
+          </div>
+        </details>
       </div>
-      <div class="confSummary" id="conflictSummary"></div>
-      <div class="row">
-        <button class="btn" id="conflictOkBtn" type="button">Continue</button>
-        <button class="btn danger" id="cancelBtn" type="button">Cancel</button>
+      <div class="confButtons">
+        <button class="btn primary" id="conflictOkBtn" type="button" data-i18n="dlg.ok">Continue</button>
+        <button class="btn secondary" id="cancelBtn" type="button" data-i18n="dlg.cancel">Cancel job</button>
       </div>
     </div>
   </div>
@@ -1793,6 +2003,420 @@ _HTML_TEMPLATE = r"""<!doctype html>
     'use strict';
 
     const $ = (id) => document.getElementById(id);
+
+    // ---- Language ------------------------------------------------------
+    // German when the browser's first language is German, English otherwise;
+    // ?lang=de or ?lang=en in the address overrides that.
+    const LANG = (() => {
+      try {
+        const forced = (new URLSearchParams(window.location.search).get('lang') || '').toLowerCase();
+        if (forced === 'de' || forced === 'en') return forced;
+      } catch (e) { /* no query string support: fall through */ }
+      const prefs = (navigator.languages && navigator.languages.length)
+        ? navigator.languages : [navigator.language || ''];
+      return /^de(-|$)/i.test(String(prefs[0] || '')) ? 'de' : 'en';
+    })();
+    document.documentElement.lang = LANG;
+
+    // One table per language. {name} marks a placeholder; a key with ".one"
+    // and ".other" forms is chosen by params.n (1 is singular, all else plural).
+    const STRINGS = {
+      en: {
+        'app.title': 'Local Upload Server',
+        'intro.both': 'Files you add here are saved in {folder} on {device}.',
+        'intro.folder': 'Files you add here are saved in {folder} on the device that runs this server.',
+        'intro.device': 'Files you add here are saved on {device}.',
+        'intro.none': 'Files you add here are saved on the device that runs this server.',
+        'intro.more': 'They upload one at a time, and a lost connection is retried automatically.',
+        'btn.chooseFiles': 'Choose files',
+        'btn.chooseFolder': 'Choose a folder',
+        'drop.hint': 'or drop files and folders anywhere on this page',
+        'btn.abort': 'Abort job',
+        'btn.clearDone': 'Clear finished',
+        'btn.remove': 'Remove',
+        'btn.retry': 'Retry',
+        'btn.hide': 'Hide',
+        'tip.drag': 'Drag to reorder',
+        'tip.next': 'Upload this next',
+        'tip.up': 'Move up',
+        'tip.down': 'Move down',
+        'queue.title': 'Queue',
+        'queue.empty': 'No uploads yet.',
+        'queue.aria': 'Upload queue',
+        'status.aria': 'Overall upload progress',
+        'status.idle': 'Idle',
+        'status.waiting.one': '{n} job waiting',
+        'status.waiting.other': '{n} jobs waiting',
+        'status.troubled.one': '{n} job with files not uploaded',
+        'status.troubled.other': '{n} jobs with files not uploaded',
+        'stat.nothing': 'Nothing queued.',
+        'stat.uploaded': 'uploaded {size} • total upload time {time}',
+        'stat.files': '{done}/{total} files',
+        'stat.noData': 'No data moving for {time}',
+        'stat.eta': 'eta {time}',
+        'stat.upTime': 'upload time {time}',
+        'stat.waiting': '{n} waiting',
+        'announce.progress': 'Upload {step} percent, {done} of {total} files done.',
+        'aria.progress': '{pct} percent, {done} of {total} files',
+        'aria.progressIdle': '{pct} percent',
+        'dur.h': '{h}h {m}m {s}s',
+        'dur.m': '{m}m {s}s',
+        'dur.s': '{s}s',
+        'badge.done': 'done',
+        'badge.error': 'error',
+        'badge.canceled': 'canceled',
+        'badge.uploading': 'uploading',
+        'badge.checking': 'checking',
+        'badge.queued': 'queued',
+        'label.file': 'File: {name}',
+        'label.files': 'Files: {n} ({name} ...)',
+        'label.folder': 'Folder: {name}',
+        'job.filesSize.one': '{n} file, {size}',
+        'job.filesSize.other': '{n} files, {size}',
+        'job.checking': 'checking...',
+        'job.progressFile': 'file {i}/{n}: {path}',
+        'job.skipped': 'skipped {n} (already on server)',
+        'job.failedN': 'failed {n}',
+        'job.errorDefault': 'Error',
+        'job.canceledDefault': 'Canceled',
+        'job.canceledBefore': 'Canceled (before upload)',
+        'job.canceled': 'Canceled',
+        'job.notUploaded.one': '{n} file not uploaded. Retry sends only that one.',
+        'job.notUploaded.other': '{n} files not uploaded. Retry sends only those.',
+        'job.stopped.one': 'Stopped after {limit} files in a row failed. {n} file not uploaded. Retry sends only that one.',
+        'job.stopped.other': 'Stopped after {limit} files in a row failed. {n} files not uploaded. Retry sends only those.',
+        'job.nothingNew.one': 'Nothing new to upload: the selected file is already in the queue.',
+        'job.nothingNew.other': 'Nothing new to upload: the {n} selected files are already in the queue.',
+        'job.nothingToUpload.one': 'Nothing to upload: the selected file stays as it is.',
+        'job.nothingToUpload.other': 'Nothing to upload: the {n} selected files stay as they are.',
+        'info.selected': '{n} selected',
+        'info.exists': '{n} already on the server',
+        'info.inProgress': '{n} being uploaded by another job',
+        'info.queuedDup': '{n} already in the queue',
+        'info.dupSel': '{n} twice in the selection',
+        'fail.summary.one': 'Show {n} failed file',
+        'fail.summary.other': 'Show {n} failed files',
+        'fail.more': 'and {n} more',
+        'fail.entry': '{path}: {error}',
+        'fail.generic': 'failed',
+        'page.queuedSkipped.one': 'The selected file is already in the queue and was left out.',
+        'page.queuedSkipped.other': '{skipped} of {n} selected files are already in the queue and were left out.',
+        'page.emptyFolder': 'That folder contains no files, so there is nothing to upload.',
+        'page.cannotRead': 'Could not read "{name}": {error}',
+        'page.jsError': 'Page error: {error}',
+        'note.busy': 'Waiting for another upload from this device',
+        'note.waitFile': 'Waiting for the file (still downloading?)',
+        'note.retry': '{what}, retry {nth}/{max} in {s} s',
+        'note.serverDown': 'Server not reachable, next check in {s} s',
+        'note.checking': 'Checking whether the server answers',
+        'note.secondPass.one': '{n} file failed, trying again in {s} s',
+        'note.secondPass.other': '{n} files failed, trying again in {s} s',
+        'err.fileTimeout': 'The file could not be read in time',
+        'err.fileRead': 'The file could not be read (moved, deleted, locked, or cloud-only while offline)',
+        'err.canceled': 'Upload canceled',
+        'err.otherWriting': 'Another upload is writing this file right now',
+        'err.http': 'HTTP {status}',
+        'err.connection': 'Connection lost',
+        'err.timeout': 'Per-file time limit hit',
+        'err.stalled': 'No data moved for {s} s',
+        'err.noServer': 'Server not reachable',
+        'err.noServerPre': 'Server not reachable (the file list did not get through)',
+        'dlg.title.one': '{n} file is already on the server',
+        'dlg.title.other': '{n} files are already on the server',
+        'dlg.titleBusy.one': '{n} file cannot be uploaded right now',
+        'dlg.titleBusy.other': '{n} files cannot be uploaded right now',
+        'dlg.instr': 'Tick the files you want to replace. Files you leave unticked stay as they are and are not uploaded.',
+        'dlg.instrBusy': 'Another upload is handling these files, so they cannot be replaced right now.',
+        'dlg.rest.one': 'The other file uploads normally.',
+        'dlg.rest.other': 'The other {n} files upload normally.',
+        'dlg.inProgress.one': '{n} file is being uploaded by another job right now.',
+        'dlg.inProgress.other': '{n} files are being uploaded by another job right now.',
+        'dlg.queued.one': '{n} file is already in the queue.',
+        'dlg.queued.other': '{n} files are already in the queue.',
+        'dlg.dupSel.one': '{n} file appears twice in your selection.',
+        'dlg.dupSel.other': '{n} files appear twice in your selection.',
+        'dlg.replaceAll': 'Replace all',
+        'dlg.replaceShown': 'Replace all shown',
+        'dlg.tag.keep': 'keep',
+        'dlg.tag.replace': 'replace',
+        'dlg.tag.progress': 'in progress',
+        'dlg.tag.duplicate': 'duplicate',
+        'dlg.summary': 'Replace {replace} · keep {keep}',
+        'dlg.summaryShowing': 'Replace {replace} · keep {keep} · showing {shown} of {total}',
+        'dlg.more': 'Filter and folder rules',
+        'dlg.ok': 'Continue',
+        'dlg.cancel': 'Cancel job',
+        'dlg.hideFolders': 'Hide folder view',
+        'dlg.showFolders': 'Show folder view',
+        'dlg.hideFiles': 'Hide file view',
+        'dlg.showFiles': 'Show file view',
+        'dlg.sel.all': 'Showing: all files',
+        'dlg.sel.selected': 'Showing: files to replace',
+        'dlg.sel.unselected': 'Showing: files to keep',
+        'dlg.sizeLarger': 'Larger size',
+        'dlg.sizeCompact': 'Compact size',
+        'dlg.scope.label': 'Search in',
+        'dlg.scope.files': 'file names',
+        'dlg.scope.folders': 'folder names',
+        'dlg.scope.both': 'both',
+        'dlg.filter.ph': 'Filter by path…',
+        'dlg.filterMeta': 'Files shown: {files} of {allFiles} · folders shown: {folders} of {allFolders}',
+        'dlg.folderMeta': 'Folders you can change: {editable} of {total}.',
+        'dlg.noFolders': 'No folders.',
+        'dlg.root': '(top level)',
+        'dlg.folderLabel.one': '{name} ({n} file)',
+        'dlg.folderLabel.other': '{name} ({n} files)',
+        'dlg.folderLabelLocked.one': '{name} ({n} file, {locked} locked)',
+        'dlg.folderLabelLocked.other': '{name} ({n} files, {locked} locked)',
+        'dlg.folderRuleAria': 'Rule for folder {name}',
+        'dlg.opt.keep': 'keep',
+        'dlg.opt.replace': 'replace',
+        'dlg.opt.mixed': 'mixed',
+      },
+      de: {
+        'app.title': 'Lokaler Upload-Server',
+        'intro.both': 'Dateien, die du hier hinzufügst, werden in {folder} auf {device} gespeichert.',
+        'intro.folder': 'Dateien, die du hier hinzufügst, werden in {folder} auf dem Gerät gespeichert, auf dem dieser Server läuft.',
+        'intro.device': 'Dateien, die du hier hinzufügst, werden auf {device} gespeichert.',
+        'intro.none': 'Dateien, die du hier hinzufügst, werden auf dem Gerät gespeichert, auf dem dieser Server läuft.',
+        'intro.more': 'Sie werden nacheinander hochgeladen. Reißt die Verbindung ab, versucht die Seite es von selbst noch einmal.',
+        'btn.chooseFiles': 'Dateien auswählen',
+        'btn.chooseFolder': 'Ordner auswählen',
+        'drop.hint': 'oder Dateien und Ordner einfach auf diese Seite ziehen',
+        'btn.abort': 'Auftrag abbrechen',
+        'btn.clearDone': 'Erledigte entfernen',
+        'btn.remove': 'Entfernen',
+        'btn.retry': 'Erneut versuchen',
+        'btn.hide': 'Ausblenden',
+        'tip.drag': 'Zum Umsortieren ziehen',
+        'tip.next': 'Als Nächstes hochladen',
+        'tip.up': 'Nach oben',
+        'tip.down': 'Nach unten',
+        'queue.title': 'Warteschlange',
+        'queue.empty': 'Noch nichts hochgeladen.',
+        'queue.aria': 'Warteschlange der Uploads',
+        'status.aria': 'Gesamtfortschritt des Hochladens',
+        'status.idle': 'Bereit',
+        'status.waiting.one': '{n} Auftrag wartet',
+        'status.waiting.other': '{n} Aufträge warten',
+        'status.troubled.one': '{n} Auftrag mit nicht hochgeladenen Dateien',
+        'status.troubled.other': '{n} Aufträge mit nicht hochgeladenen Dateien',
+        'stat.nothing': 'Nichts in der Warteschlange.',
+        'stat.uploaded': '{size} hochgeladen • Gesamtzeit {time}',
+        'stat.files': '{done}/{total} Dateien',
+        'stat.noData': 'Seit {time} kommen keine Daten an',
+        'stat.eta': 'noch {time}',
+        'stat.upTime': 'Dauer {time}',
+        'stat.waiting': '{n} wartend',
+        'announce.progress': 'Hochladen zu {step} Prozent, {done} von {total} Dateien fertig.',
+        'aria.progress': '{pct} Prozent, {done} von {total} Dateien',
+        'aria.progressIdle': '{pct} Prozent',
+        'dur.h': '{h} Std. {m} Min. {s} s',
+        'dur.m': '{m} Min. {s} s',
+        'dur.s': '{s} s',
+        'badge.done': 'fertig',
+        'badge.error': 'Fehler',
+        'badge.canceled': 'abgebrochen',
+        'badge.uploading': 'lädt hoch',
+        'badge.checking': 'wird geprüft',
+        'badge.queued': 'wartet',
+        'label.file': 'Datei: {name}',
+        'label.files': 'Dateien: {n} ({name} …)',
+        'label.folder': 'Ordner: {name}',
+        'job.filesSize.one': '{n} Datei, {size}',
+        'job.filesSize.other': '{n} Dateien, {size}',
+        'job.checking': 'wird geprüft …',
+        'job.progressFile': 'Datei {i}/{n}: {path}',
+        'job.skipped': '{n} übersprungen (schon auf dem Server)',
+        'job.failedN': '{n} fehlgeschlagen',
+        'job.errorDefault': 'Fehler',
+        'job.canceledDefault': 'Abgebrochen',
+        'job.canceledBefore': 'Abgebrochen (vor dem Hochladen)',
+        'job.canceled': 'Abgebrochen',
+        'job.notUploaded.one': '{n} Datei nicht hochgeladen. „Erneut versuchen“ sendet nur diese.',
+        'job.notUploaded.other': '{n} Dateien nicht hochgeladen. „Erneut versuchen“ sendet nur diese.',
+        'job.stopped.one': 'Angehalten, nachdem {limit} Dateien hintereinander fehlgeschlagen sind. {n} Datei nicht hochgeladen. „Erneut versuchen“ sendet nur diese.',
+        'job.stopped.other': 'Angehalten, nachdem {limit} Dateien hintereinander fehlgeschlagen sind. {n} Dateien nicht hochgeladen. „Erneut versuchen“ sendet nur diese.',
+        'job.nothingNew.one': 'Nichts Neues zum Hochladen: Die ausgewählte Datei ist schon in der Warteschlange.',
+        'job.nothingNew.other': 'Nichts Neues zum Hochladen: Die {n} ausgewählten Dateien sind schon in der Warteschlange.',
+        'job.nothingToUpload.one': 'Nichts hochzuladen: Die ausgewählte Datei bleibt, wie sie ist.',
+        'job.nothingToUpload.other': 'Nichts hochzuladen: Die {n} ausgewählten Dateien bleiben, wie sie sind.',
+        'info.selected': '{n} ausgewählt',
+        'info.exists': '{n} schon auf dem Server',
+        'info.inProgress': '{n} lädt gerade ein anderer Auftrag hoch',
+        'info.queuedDup': '{n} schon in der Warteschlange',
+        'info.dupSel': '{n} doppelt in der Auswahl',
+        'fail.summary.one': '{n} fehlgeschlagene Datei anzeigen',
+        'fail.summary.other': '{n} fehlgeschlagene Dateien anzeigen',
+        'fail.more': 'und {n} weitere',
+        'fail.entry': '{path}: {error}',
+        'fail.generic': 'fehlgeschlagen',
+        'page.queuedSkipped.one': 'Die ausgewählte Datei ist schon in der Warteschlange und wurde weggelassen.',
+        'page.queuedSkipped.other': '{skipped} von {n} ausgewählten Dateien sind schon in der Warteschlange und wurden weggelassen.',
+        'page.emptyFolder': 'In diesem Ordner liegen keine Dateien, es gibt also nichts hochzuladen.',
+        'page.cannotRead': '„{name}“ konnte nicht gelesen werden: {error}',
+        'page.jsError': 'Fehler auf der Seite: {error}',
+        'note.busy': 'Warte, bis ein anderer Upload dieses Geräts fertig ist',
+        'note.waitFile': 'Warte auf die Datei (wird sie noch heruntergeladen?)',
+        'note.retry': '{what}, neuer Versuch {nth}/{max} in {s} s',
+        'note.serverDown': 'Server nicht erreichbar, nächste Prüfung in {s} s',
+        'note.checking': 'Prüfe, ob der Server antwortet',
+        'note.secondPass.one': '{n} Datei ist fehlgeschlagen, neuer Versuch in {s} s',
+        'note.secondPass.other': '{n} Dateien sind fehlgeschlagen, neuer Versuch in {s} s',
+        'err.fileTimeout': 'Die Datei ließ sich nicht rechtzeitig lesen',
+        'err.fileRead': 'Die Datei ließ sich nicht lesen (verschoben, gelöscht, gesperrt oder nur in der Cloud und gerade offline)',
+        'err.canceled': 'Hochladen abgebrochen',
+        'err.otherWriting': 'Ein anderer Upload schreibt diese Datei gerade',
+        'err.http': 'HTTP {status}',
+        'err.connection': 'Verbindung verloren',
+        'err.timeout': 'Zeitlimit für diese Datei erreicht',
+        'err.stalled': 'Seit {s} s sind keine Daten geflossen',
+        'err.noServer': 'Server nicht erreichbar',
+        'err.noServerPre': 'Server nicht erreichbar (die Dateiliste kam nicht an)',
+        'dlg.title.one': '{n} Datei ist schon auf dem Server',
+        'dlg.title.other': '{n} Dateien sind schon auf dem Server',
+        'dlg.titleBusy.one': '{n} Datei kann gerade nicht hochgeladen werden',
+        'dlg.titleBusy.other': '{n} Dateien können gerade nicht hochgeladen werden',
+        'dlg.instr': 'Hake die Dateien an, die du ersetzen willst. Nicht angehakte Dateien bleiben, wie sie sind, und werden nicht hochgeladen.',
+        'dlg.instrBusy': 'Ein anderer Upload bearbeitet diese Dateien, deshalb kannst du sie gerade nicht ersetzen.',
+        'dlg.rest.one': 'Die andere Datei wird ganz normal hochgeladen.',
+        'dlg.rest.other': 'Die anderen {n} Dateien werden ganz normal hochgeladen.',
+        'dlg.inProgress.one': '{n} Datei wird gerade von einem anderen Auftrag hochgeladen.',
+        'dlg.inProgress.other': '{n} Dateien werden gerade von einem anderen Auftrag hochgeladen.',
+        'dlg.queued.one': '{n} Datei ist schon in der Warteschlange.',
+        'dlg.queued.other': '{n} Dateien sind schon in der Warteschlange.',
+        'dlg.dupSel.one': '{n} Datei kommt in deiner Auswahl doppelt vor.',
+        'dlg.dupSel.other': '{n} Dateien kommen in deiner Auswahl doppelt vor.',
+        'dlg.replaceAll': 'Alle ersetzen',
+        'dlg.replaceShown': 'Alle angezeigten ersetzen',
+        'dlg.tag.keep': 'behalten',
+        'dlg.tag.replace': 'ersetzen',
+        'dlg.tag.progress': 'läuft gerade',
+        'dlg.tag.duplicate': 'doppelt',
+        'dlg.summary': 'Ersetzen: {replace} · behalten: {keep}',
+        'dlg.summaryShowing': 'Ersetzen: {replace} · behalten: {keep} · {shown} von {total} angezeigt',
+        'dlg.more': 'Filter und Ordnerregeln',
+        'dlg.ok': 'Weiter',
+        'dlg.cancel': 'Auftrag abbrechen',
+        'dlg.hideFolders': 'Ordneransicht ausblenden',
+        'dlg.showFolders': 'Ordneransicht einblenden',
+        'dlg.hideFiles': 'Dateiansicht ausblenden',
+        'dlg.showFiles': 'Dateiansicht einblenden',
+        'dlg.sel.all': 'Angezeigt: alle Dateien',
+        'dlg.sel.selected': 'Angezeigt: zu ersetzende',
+        'dlg.sel.unselected': 'Angezeigt: zu behaltende',
+        'dlg.sizeLarger': 'Größer anzeigen',
+        'dlg.sizeCompact': 'Kleiner anzeigen',
+        'dlg.scope.label': 'Suchen in',
+        'dlg.scope.files': 'Dateinamen',
+        'dlg.scope.folders': 'Ordnernamen',
+        'dlg.scope.both': 'beidem',
+        'dlg.filter.ph': 'Nach Pfad filtern …',
+        'dlg.filterMeta': 'Angezeigte Dateien: {files} von {allFiles} · Ordner: {folders} von {allFolders}',
+        'dlg.folderMeta': 'Ordner, die du ändern kannst: {editable} von {total}.',
+        'dlg.noFolders': 'Keine Ordner.',
+        'dlg.root': '(oberste Ebene)',
+        'dlg.folderLabel.one': '{name} ({n} Datei)',
+        'dlg.folderLabel.other': '{name} ({n} Dateien)',
+        'dlg.folderLabelLocked.one': '{name} ({n} Datei, {locked} gesperrt)',
+        'dlg.folderLabelLocked.other': '{name} ({n} Dateien, {locked} gesperrt)',
+        'dlg.folderRuleAria': 'Regel für den Ordner {name}',
+        'dlg.opt.keep': 'behalten',
+        'dlg.opt.replace': 'ersetzen',
+        'dlg.opt.mixed': 'gemischt',
+      },
+    };
+
+    function t(key, params) {
+      let s;
+      if (params && typeof params.n === 'number') {
+        const form = key + (params.n === 1 ? '.one' : '.other');
+        s = STRINGS[LANG][form];
+        if (s === undefined) s = STRINGS.en[form];
+      }
+      if (s === undefined) s = STRINGS[LANG][key];
+      if (s === undefined) s = STRINGS.en[key];
+      if (s === undefined) return key;
+      return s.replace(/\{(\w+)\}/g, (m, name) =>
+        (params && Object.prototype.hasOwnProperty.call(params, name)) ? String(params[name]) : m);
+    }
+
+    // Texts the server sends in the "error" field of its JSON answers are
+    // English. The fixed ones are translated here; parameterised or unknown
+    // ones pass through unchanged. English needs no translation.
+    const SERVER_ERRORS_DE = {
+      'not_found': 'Nicht gefunden.',
+      'invalid request target': 'Ungültige Adresse.',
+      'cross-origin request refused': 'Anfrage von einer anderen Webseite abgelehnt.',
+      'Invalid path (..)': 'Ungültiger Pfad (..).',
+      'Empty file path': 'Der Dateipfad ist leer.',
+      'invalid target path': 'Ungültiger Zielpfad.',
+      'target path is a directory': 'Der Zielpfad ist ein Ordner.',
+      'upload_id missing': 'Die Auftrags-ID fehlt.',
+      'invalid upload_id': 'Ungültige Auftrags-ID.',
+      'items missing or empty': 'Die Dateiliste fehlt oder ist leer.',
+      'request too large': 'Die Anfrage ist zu groß.',
+      'chunked transfer encoding is not supported':
+        'Der Browser hat die Datei ohne Größenangabe geschickt. Das wird nicht unterstützt.',
+      'missing or invalid Content-Length': 'Die Größenangabe der Datei fehlt oder ist ungültig.',
+      'Another upload from this device is running': 'Von diesem Gerät läuft schon ein anderer Upload.',
+      'Not enough disk space': 'Auf dem Server ist nicht genug Speicherplatz frei.',
+      "The server's file system cannot store this path":
+        'Das Dateisystem des Servers kann diesen Pfad nicht speichern.',
+    };
+
+    function localizeServerError(message) {
+      const raw = String(message || '');
+      if (LANG !== 'de') return raw;
+      if (Object.prototype.hasOwnProperty.call(SERVER_ERRORS_DE, raw)) return SERVER_ERRORS_DE[raw];
+      let m = /^Not enough disk space\. Required: (.+), Available: (.+)$/.exec(raw);
+      if (m) {
+        return `Auf dem Server ist nicht genug Speicherplatz frei. Nötig: ${m[1].replace('.', ',')}, frei: ${m[2].replace('.', ',')}.`;
+      }
+      m = /^File or folder name too long: (.*)$/.exec(raw);
+      if (m) return `Der Datei- oder Ordnername ist zu lang: ${m[1]}`;
+      m = /^This server does not answer under the name (.+)\. Open it by its IP address, or start it with --allow-host and that name\.$/.exec(raw);
+      if (m) {
+        return `Dieser Server antwortet nicht unter dem Namen ${m[1]}. Öffne ihn über seine IP-Adresse oder starte ihn mit --allow-host und diesem Namen.`;
+      }
+      return raw;
+    }
+
+    // Static markup carries data-i18n (text), data-i18n-aria-label,
+    // data-i18n-placeholder and data-i18n-title (attributes).
+    function applyStaticText() {
+      for (const el of document.querySelectorAll('[data-i18n]')) {
+        el.textContent = t(el.getAttribute('data-i18n'));
+      }
+      for (const attr of ['aria-label', 'placeholder', 'title']) {
+        for (const el of document.querySelectorAll(`[data-i18n-${attr}]`)) {
+          el.setAttribute(attr, t(el.getAttribute(`data-i18n-${attr}`)));
+        }
+      }
+      document.title = t('app.title');
+    }
+
+    // The sentence under the title names where files end up. The folder and
+    // the device are user-controlled text: they go in as text nodes, never
+    // as HTML.
+    function renderIntro() {
+      const key = DESTINATION_FOLDER && DESTINATION_DEVICE ? 'intro.both'
+        : DESTINATION_FOLDER ? 'intro.folder'
+          : DESTINATION_DEVICE ? 'intro.device' : 'intro.none';
+      const el = $('introDest');
+      el.textContent = '';
+      for (const part of t(key).split(/(\{folder\}|\{device\})/)) {
+        if (part === '{folder}' || part === '{device}') {
+          const strong = document.createElement('strong');
+          strong.className = 'dest';
+          strong.textContent = part === '{folder}' ? DESTINATION_FOLDER : DESTINATION_DEVICE;
+          el.appendChild(strong);
+        } else if (part) {
+          el.appendChild(document.createTextNode(part));
+        }
+      }
+      $('introMore').textContent = t('intro.more');
+    }
     const queue = [];
     let activeJob = null;
     // Stops whatever the running job is waiting on (a request or a file read).
@@ -1832,8 +2456,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
     const FAILED_LIST_LIMIT = 200;
     // Status notes come first in a one-line display that a phone cuts off
     // after about 42 characters, so they are kept shorter than that.
-    const BUSY_NOTE = 'Waiting for another upload from this device';
+    const BUSY_NOTE = t('note.busy');
     const CASE_INSENSITIVE_FS = __CASE_INSENSITIVE_FS__;
+    // Where uploads end up, for the line under the title; either may be ''.
+    const DESTINATION_FOLDER = __DESTINATION_FOLDER__;
+    const DESTINATION_DEVICE = __DESTINATION_DEVICE__;
     const actionLocks = new Set();
     // Id of the queue row currently being dragged, or null.
     let dragJobId = null;
@@ -1853,7 +2480,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
     // one, so a short hiccup does not make "time left" jump upwards.
     const ETA_FALL_ALPHA = 0.3;
     const ETA_RISE_ALPHA = 0.1;
-    const BASE_TITLE = document.title;
+    const BASE_TITLE = t('app.title');
 
     // Time actually spent uploading, summed over every finished run. Idle
     // gaps between uploads are not part of it, so a job added hours later
@@ -1928,7 +2555,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
       let v = n;
       let i = 0;
       while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-      return `${v.toFixed(i === 0 ? 0 : (v < 10 ? 2 : 1))} ${units[i]}`;
+      const digits = v.toFixed(i === 0 ? 0 : (v < 10 ? 2 : 1));
+      return `${LANG === 'de' ? digits.replace('.', ',') : digits} ${units[i]}`;
     }
 
     function formatSpeed(bps) {
@@ -1989,9 +2617,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
       const h = Math.floor(s / 3600);
       const m = Math.floor((s % 3600) / 60);
       const r = s % 60;
-      if (h > 0) return `${h}h ${m}m ${r}s`;
-      if (m > 0) return `${m}m ${r}s`;
-      return `${r}s`;
+      if (h > 0) return t('dur.h', { h, m, s: r });
+      if (m > 0) return t('dur.m', { m, s: r });
+      return t('dur.s', { s: r });
     }
 
     function normPath(p) {
@@ -2019,12 +2647,18 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
     function statusBadge(job) {
       const s = job.status;
-      if (s === 'done') return '<span class="badge ok">done</span>';
-      if (s === 'error') return '<span class="badge err">error</span>';
-      if (s === 'canceled') return '<span class="badge err">canceled</span>';
-      if (s === 'uploading') return '<span class="badge run">uploading</span>';
-      if (s === 'preflight') return '<span class="badge run">preflight</span>';
-      return '<span class="badge">queued</span>';
+      const badge = (cls, key) => {
+        const span = document.createElement('span');
+        span.className = cls;
+        span.textContent = t(key);
+        return span;
+      };
+      if (s === 'done') return badge('badge ok', 'badge.done');
+      if (s === 'error') return badge('badge err', 'badge.error');
+      if (s === 'canceled') return badge('badge err', 'badge.canceled');
+      if (s === 'uploading') return badge('badge run', 'badge.uploading');
+      if (s === 'preflight') return badge('badge run', 'badge.checking');
+      return badge('badge', 'badge.queued');
     }
 
     // Rows may only be reordered while they are still waiting. Everything
@@ -2063,43 +2697,46 @@ _HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function jobSubText(job) {
-      const infoBits = [];
+      const parts = [];
       // Only worth a mention when some of the selection was left out.
       if (Number.isFinite(job.selectedCount) && job.selectedCount > job.items.length) {
-        infoBits.push(`selected ${job.selectedCount}`);
+        parts.push(t('info.selected', { n: job.selectedCount }));
       }
       if (Number.isFinite(job.existsCount) && job.existsCount > 0) {
-        infoBits.push(`already on server ${job.existsCount}`);
+        parts.push(t('info.exists', { n: job.existsCount }));
       }
       if (Number.isFinite(job.inProgressCount) && job.inProgressCount > 0) {
-        infoBits.push(`currently uploading ${job.inProgressCount}`);
+        parts.push(t('info.inProgress', { n: job.inProgressCount }));
       }
       if (Number.isFinite(job.queuedDupCount) && job.queuedDupCount > 0) {
-        infoBits.push(`already in queue ${job.queuedDupCount}`);
+        parts.push(t('info.queuedDup', { n: job.queuedDupCount }));
       }
       if (Number.isFinite(job.duplicateInSelectionCount) && job.duplicateInSelectionCount > 0) {
-        infoBits.push(`duplicate in selection ${job.duplicateInSelectionCount}`);
+        parts.push(t('info.dupSel', { n: job.duplicateInSelectionCount }));
       }
-      const infoPrefix = infoBits.length ? `${infoBits.join(' • ')} • ` : '';
+      parts.push(t('job.filesSize', { n: job.items.length, size: formatBytes(job.totalBytes) }));
       const pct = job.totalBytes > 0 ? Math.floor((job.uploadedBytes / job.totalBytes) * 100) : 0;
-      let extra = '';
       if (job.status === 'uploading') {
-        extra = ` • ${pct}%`;
+        parts.push(`${pct}%`);
         if (job.currentPath) {
-          extra += ` • file ${job.currentIndex || 0}/${job.items.length}: ${job.currentPath}`;
+          parts.push(t('job.progressFile', {
+            i: job.currentIndex || 0, n: job.items.length, path: job.currentPath,
+          }));
         }
       }
-      if (job.status === 'preflight') extra = ' • checking...';
-      if (job.status === 'error') extra = ` • ${job.error || 'Error'}`;
-      if (job.status === 'canceled') extra = ` • ${job.error || 'Canceled'}`;
-      if (job.status === 'done' && job.error) extra = ` • ${job.error}`;
+      if (job.status === 'preflight') parts.push(t('job.checking'));
+      if (job.status === 'error') parts.push(job.error || t('job.errorDefault'));
+      if (job.status === 'canceled') parts.push(job.error || t('job.canceledDefault'));
+      if (job.status === 'done' && job.error) parts.push(job.error);
       if (job.status !== 'uploading') {
         const kept = job.items.filter(it => it.skipped).length;
-        if (kept) extra += ` • skipped ${kept} (already on server)`;
+        if (kept) parts.push(t('job.skipped', { n: kept }));
       }
-      if (job.failedCount && job.status === 'uploading') extra += ` • failed ${job.failedCount}`;
-      const dur = job.durationSec ? ` • ${formatDuration(job.durationSec)}` : '';
-      return `${infoPrefix}${job.items.length} file(s), ${formatBytes(job.totalBytes)}${extra}${dur}`;
+      if (job.failedCount && job.status === 'uploading') {
+        parts.push(t('job.failedN', { n: job.failedCount }));
+      }
+      if (job.durationSec) parts.push(formatDuration(job.durationSec));
+      return parts.join(' • ');
     }
 
     function iconButton(label, title, onClick) {
@@ -2122,6 +2759,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
       const keepScroll = list.scrollTop;
       list.innerHTML = '';
       $('queueEmpty').style.display = queue.length ? 'none' : 'block';
+      // "Clear finished" is only offered while there is something to clear.
+      $('clearDoneBtn').hidden = !queue.some(
+        j => j.status === 'done' || j.status === 'error' || j.status === 'canceled');
       const positions = queuedPositions();
 
       for (const job of queue) {
@@ -2139,7 +2779,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
           const grip = document.createElement('span');
           grip.className = 'qgrip';
           grip.textContent = '⠿ ';
-          grip.title = 'Drag to reorder';
+          grip.title = t('tip.drag');
           title.appendChild(grip);
         }
         title.appendChild(document.createTextNode(job.label));
@@ -2160,17 +2800,17 @@ _HTML_TEMPLATE = r"""<!doctype html>
           details.open = !!job.failOpen;
           details.addEventListener('toggle', () => { job.failOpen = details.open; });
           const summary = document.createElement('summary');
-          summary.textContent = `Show ${failed.length} failed file(s)`;
+          summary.textContent = t('fail.summary', { n: failed.length });
           details.appendChild(summary);
           const ul = document.createElement('ul');
           for (const item of failed.slice(0, FAILED_LIST_LIMIT)) {
             const row = document.createElement('li');
-            row.textContent = `${item.path}: ${item.lastError || 'failed'}`;
+            row.textContent = t('fail.entry', { path: item.path, error: item.lastError || t('fail.generic') });
             ul.appendChild(row);
           }
           if (failed.length > FAILED_LIST_LIMIT) {
             const more = document.createElement('li');
-            more.textContent = `and ${failed.length - FAILED_LIST_LIMIT} more`;
+            more.textContent = t('fail.more', { n: failed.length - FAILED_LIST_LIMIT });
             ul.appendChild(more);
           }
           details.appendChild(ul);
@@ -2192,18 +2832,18 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
         const actions = document.createElement('div');
         actions.className = 'qactions';
-        actions.innerHTML = statusBadge(job);
+        actions.appendChild(statusBadge(job));
 
         if (job.status === 'queued') {
           if (positions.length > 1) {
             const at = positions.indexOf(queue.indexOf(job));
-            const top = iconButton('⤒', 'Upload this next', () =>
+            const top = iconButton('⤒', t('tip.next'), () =>
               withActionLock(`top:${job.id}`, () => moveJobToFront(job)));
             top.disabled = at <= 0;
-            const up = iconButton('↑', 'Move up', () =>
+            const up = iconButton('↑', t('tip.up'), () =>
               withActionLock(`up:${job.id}`, () => moveJobByStep(job, -1)));
             up.disabled = at <= 0;
-            const down = iconButton('↓', 'Move down', () =>
+            const down = iconButton('↓', t('tip.down'), () =>
               withActionLock(`down:${job.id}`, () => moveJobByStep(job, 1)));
             down.disabled = at < 0 || at >= positions.length - 1;
             actions.appendChild(top);
@@ -2250,7 +2890,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
           const btn = document.createElement('button');
           btn.className = 'btn danger';
           btn.type = 'button';
-          btn.textContent = 'Remove';
+          btn.textContent = t('btn.remove');
           btn.onclick = (ev) => {
             const target = ev && ev.currentTarget ? ev.currentTarget : null;
             if (target) target.disabled = true;
@@ -2266,7 +2906,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
             const retryBtn = document.createElement('button');
             retryBtn.className = 'btn';
             retryBtn.type = 'button';
-            retryBtn.textContent = 'Retry';
+            retryBtn.textContent = t('btn.retry');
             retryBtn.onclick = (ev) => {
               const target = ev && ev.currentTarget ? ev.currentTarget : null;
               if (target) target.disabled = true;
@@ -2277,7 +2917,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
           const btn = document.createElement('button');
           btn.className = 'btn secondary';
           btn.type = 'button';
-          btn.textContent = 'Hide';
+          btn.textContent = t('btn.hide');
           btn.onclick = (ev) => {
             const target = ev && ev.currentTarget ? ev.currentTarget : null;
             if (target) target.disabled = true;
@@ -2386,37 +3026,38 @@ _HTML_TEMPLATE = r"""<!doctype html>
           ? smoothEta(rawEta) : 0;
         const bits = [
           `${formatBytes(totals.uploadedBytes)} / ${formatBytes(totals.totalBytes)}`,
-          `${totals.doneFiles}/${totals.totalFiles} files`,
+          t('stat.files', { done: totals.doneFiles, total: totals.totalFiles }),
         ];
         // What is going wrong goes first: the line is cut off on narrow screens.
         if (activeJob.note) {
           bits.unshift(activeJob.note);
         } else if (stuck) {
-          bits.unshift(`No data moving for ${formatDuration(idleSec)}`);
+          bits.unshift(t('stat.noData', { time: formatDuration(idleSec) }));
         } else {
           bits.push(formatSpeed(rateMeter.bps));
-          bits.push(`eta ${eta > 0 ? formatDuration(eta) : '--'}`);
+          bits.push(t('stat.eta', { time: eta > 0 ? formatDuration(eta) : '--' }));
         }
-        bits.push(`upload time ${elapsedText}`);
-        if (totals.pendingJobs > 0) bits.push(`${totals.pendingJobs} waiting`);
+        bits.push(t('stat.upTime', { time: elapsedText }));
+        if (totals.pendingJobs > 0) bits.push(t('stat.waiting', { n: totals.pendingJobs }));
         setText($('overallStats'), bits.join(' • '));
         $('overallStats').classList.toggle('warn', stuck);
         if (track) {
-          track.setAttribute('aria-valuetext',
-            `${pctWhole} percent, ${totals.doneFiles} of ${totals.totalFiles} files`);
+          track.setAttribute('aria-valuetext', t('aria.progress', {
+            pct: pctWhole, done: totals.doneFiles, total: totals.totalFiles,
+          }));
         }
         setTitleProgress(`${pctWhole}%`);
         announceProgress(pctWhole, totals);
       } else {
         const waiting = totals.pendingJobs;
         const troubled = queue.filter(j => j.status === 'error').length;
-        setText($('statusTitle'), waiting > 0 ? `${waiting} job(s) waiting`
-          : (troubled > 0 ? `${troubled} job(s) with files not uploaded` : 'Idle'));
+        setText($('statusTitle'), waiting > 0 ? t('status.waiting', { n: waiting })
+          : (troubled > 0 ? t('status.troubled', { n: troubled }) : t('status.idle')));
         setText($('overallStats'), session.uploadedBytes > 0
-          ? `uploaded ${formatBytes(session.uploadedBytes)} • total upload time ${elapsedText}`
-          : 'Nothing queued.');
+          ? t('stat.uploaded', { size: formatBytes(session.uploadedBytes), time: elapsedText })
+          : t('stat.nothing'));
         $('overallStats').classList.remove('warn');
-        if (track) track.setAttribute('aria-valuetext', `${pctWhole} percent`);
+        if (track) track.setAttribute('aria-valuetext', t('aria.progressIdle', { pct: pctWhole }));
         setTitleProgress(null);
         lastAnnouncedPct = -1;
       }
@@ -2431,8 +3072,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
       const step = Math.floor(pctWhole / 10) * 10;
       if (step === lastAnnouncedPct) return;
       lastAnnouncedPct = step;
-      setText($('progressAnnounce'),
-        `Upload ${step} percent, ${totals.doneFiles} of ${totals.totalFiles} files done.`);
+      setText($('progressAnnounce'), t('announce.progress', {
+        step, done: totals.doneFiles, total: totals.totalFiles,
+      }));
     }
 
     function setTitleProgress(pctText) {
@@ -2459,14 +3101,21 @@ _HTML_TEMPLATE = r"""<!doctype html>
       return run;
     }
 
+    // From this many conflicts on, the filter and folder rules start open:
+    // for a handful of files they are only in the way.
+    const CONFLICT_OPEN_LIMIT = 8;
+
     function openConflictDialog(conflicts, summaryInfo = null) {
       return new Promise((resolve) => {
         const modal = $('conflictModal');
         const modalCard = modal.querySelector('.modalCard');
+        const title = $('conflictTitle');
         const list = $('conflictList');
         const text = $('conflictText');
         const allToggle = $('conflictAll');
+        const allLabel = $('conflictAllLabel');
         const summary = $('conflictSummary');
+        const more = $('conflictMore');
         const scopeSelect = $('conflictScope');
         const filterInput = $('conflictFilter');
         const filterMeta = $('conflictFilterMeta');
@@ -2478,36 +3127,33 @@ _HTML_TEMPLATE = r"""<!doctype html>
         const toggleFileBtn = $('toggleFileBtn');
         const selectionFilterBtn = $('selectionFilterBtn');
         const toggleSizeBtn = $('toggleSizeBtn');
+        const manyConflicts = conflicts.length > CONFLICT_OPEN_LIMIT;
         list.textContent = '';
         folderList.textContent = '';
         allToggle.checked = false;
         scopeSelect.value = 'files';
         filterInput.value = '';
         let selectionMode = 'all';
-        folderSection.classList.remove('collapsed');
+        more.open = manyConflicts;
+        folderSection.classList.toggle('collapsed', !manyConflicts);
         fileSection.classList.remove('collapsed');
-        if (modalCard) {
-          modalCard.classList.remove('expanded');
-        }
+        modalCard.classList.remove('expanded');
+        modalCard.scrollTop = 0;
 
         const refreshSectionButtons = () => {
           const folderCollapsed = folderSection.classList.contains('collapsed');
           const fileCollapsed = fileSection.classList.contains('collapsed');
-          const expanded = !!(modalCard && modalCard.classList.contains('expanded'));
-          toggleFolderBtn.textContent = folderCollapsed ? 'Show folder view' : 'Hide folder view';
-          toggleFileBtn.textContent = fileCollapsed ? 'Show file view' : 'Hide file view';
-          toggleSizeBtn.textContent = expanded ? 'Compact size' : 'Larger size';
+          const expanded = modalCard.classList.contains('expanded');
+          toggleFolderBtn.textContent = t(folderCollapsed ? 'dlg.showFolders' : 'dlg.hideFolders');
+          toggleFileBtn.textContent = t(fileCollapsed ? 'dlg.showFiles' : 'dlg.hideFiles');
+          toggleSizeBtn.textContent = t(expanded ? 'dlg.sizeCompact' : 'dlg.sizeLarger');
           toggleFolderBtn.classList.toggle('mode-hidden', folderCollapsed);
           toggleFileBtn.classList.toggle('mode-hidden', fileCollapsed);
         };
         const updateSelectionButton = () => {
-          const label =
-            selectionMode === 'selected'
-              ? 'Selection: selected'
-              : selectionMode === 'unselected'
-                ? 'Selection: unselected'
-                : 'Selection: all';
-          selectionFilterBtn.textContent = label;
+          selectionFilterBtn.textContent = t(
+            selectionMode === 'selected' ? 'dlg.sel.selected'
+              : selectionMode === 'unselected' ? 'dlg.sel.unselected' : 'dlg.sel.all');
           selectionFilterBtn.classList.remove('mode-selected', 'mode-unselected');
           if (selectionMode === 'selected') {
             selectionFilterBtn.classList.add('mode-selected');
@@ -2545,7 +3191,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
           applyFilter();
         };
         toggleSizeBtn.onclick = () => {
-          if (modalCard) modalCard.classList.toggle('expanded');
+          modalCard.classList.toggle('expanded');
           refreshSectionButtons();
         };
         updateSelectionButton();
@@ -2564,10 +3210,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
         const refreshEntryVisual = (entry) => {
           const isOn = !!entry.cb.checked;
-          entry.row.className = `confRow ${isOn ? 'overwrite' : 'skip'}`;
+          entry.row.className = `confRow ${isOn ? 'overwrite' : 'skip'}${entry.locked ? ' locked' : ''}`;
           entry.tag.textContent = entry.locked
-            ? 'in progress'
-            : (isOn ? 'overwrite' : 'keep');
+            ? t(entry.reason === 'duplicate_in_request' ? 'dlg.tag.duplicate' : 'dlg.tag.progress')
+            : t(isOn ? 'dlg.tag.replace' : 'dlg.tag.keep');
         };
 
         const entries = [];
@@ -2583,8 +3229,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
           cb.type = 'checkbox';
           cb.checked = false;
           const name = document.createElement('div');
+          name.className = 'confName';
           name.textContent = rawPath;
           const tag = document.createElement('div');
+          tag.className = 'confTag';
           const entry = {
             cb,
             row,
@@ -2594,6 +3242,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
             nameNorm: rawPath.toLowerCase(),
             folderKey: getFolderKey(rawPath),
             locked,
+            reason,
           };
 
           const updateRow = () => {
@@ -2633,9 +3282,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
           const rec = folderStats.get(k);
           return !!rec && rec.locked < rec.count;
         }).length;
-        folderMeta.textContent = folderKeys.length
-          ? `Folder rules: ${editableFolders}/${folderKeys.length} editable folder(s).`
-          : 'Folder rules: no folders found.';
+        setText(folderMeta, folderKeys.length
+          ? t('dlg.folderMeta', { editable: editableFolders, total: folderKeys.length })
+          : t('dlg.noFolders'));
 
         const syncFolderControls = () => {
           const refreshFolderControlVisual = (select) => {
@@ -2683,21 +3332,22 @@ _HTML_TEMPLATE = r"""<!doctype html>
           row.className = 'confFolderRow';
           const name = document.createElement('div');
           name.className = 'confFolderName';
-          const folderLabel = folderKey || '(root)';
-          const suffix = rec.locked > 0 ? ` (${rec.count} files, ${rec.locked} locked)` : ` (${rec.count} files)`;
-          name.textContent = `${folderLabel}${suffix}`;
+          const folderLabel = folderKey || t('dlg.root');
+          name.textContent = t(rec.locked > 0 ? 'dlg.folderLabelLocked' : 'dlg.folderLabel',
+            { n: rec.count, name: folderLabel, locked: rec.locked });
 
           const select = document.createElement('select');
-          select.className = 'confFolderSelect mono';
+          select.className = 'confFolderSelect';
+          select.setAttribute('aria-label', t('dlg.folderRuleAria', { name: folderLabel }));
           const optKeep = document.createElement('option');
           optKeep.value = 'keep';
-          optKeep.textContent = 'keep';
+          optKeep.textContent = t('dlg.opt.keep');
           const optOverwrite = document.createElement('option');
           optOverwrite.value = 'overwrite';
-          optOverwrite.textContent = 'overwrite';
+          optOverwrite.textContent = t('dlg.opt.replace');
           const optMixed = document.createElement('option');
           optMixed.value = 'mixed';
-          optMixed.textContent = 'mixed';
+          optMixed.textContent = t('dlg.opt.mixed');
           optMixed.disabled = true;
           select.appendChild(optKeep);
           select.appendChild(optOverwrite);
@@ -2725,43 +3375,38 @@ _HTML_TEMPLATE = r"""<!doctype html>
         const existsCount = conflicts.filter(c => (c.reason || 'exists') === 'exists').length;
         const inProgressCount = conflicts.filter(c => c.reason === 'in_progress').length;
         const dupReqCount = conflicts.filter(c => c.reason === 'duplicate_in_request').length;
-        const selectedCount = summaryInfo && Number.isFinite(summaryInfo.selectedCount)
-          ? Number(summaryInfo.selectedCount)
-          : null;
         const queuedDupCount = summaryInfo && Number.isFinite(summaryInfo.queuedDupCount)
           ? Number(summaryInfo.queuedDupCount)
           : 0;
-        const infoParts = [];
-        if (selectedCount !== null) infoParts.push(`selected: ${selectedCount}`);
-        if (existsCount > 0) infoParts.push(`already on server: ${existsCount}`);
-        if (inProgressCount > 0) infoParts.push(`currently uploading: ${inProgressCount}`);
-        if (queuedDupCount > 0) infoParts.push(`already in queue: ${queuedDupCount}`);
-        if (dupReqCount > 0) infoParts.push(`duplicate in selection: ${dupReqCount}`);
-        const summaryText = infoParts.length ? ` (${infoParts.join(' • ')})` : '';
-        text.textContent = `${conflicts.length} conflict(s) found${summaryText}. Choose what to do (file-level and folder-level rules available).`;
+        // Files of this job that were not in conflict and upload as usual.
+        const restCount = summaryInfo && Number.isFinite(summaryInfo.totalCount)
+          ? Math.max(0, Number(summaryInfo.totalCount) - conflicts.length)
+          : 0;
+        title.textContent = existsCount > 0
+          ? t('dlg.title', { n: existsCount })
+          : t('dlg.titleBusy', { n: conflicts.length });
+        const sentences = [t(existsCount > 0 ? 'dlg.instr' : 'dlg.instrBusy')];
+        if (restCount > 0) sentences.push(t('dlg.rest', { n: restCount }));
+        if (inProgressCount > 0) sentences.push(t('dlg.inProgress', { n: inProgressCount }));
+        if (queuedDupCount > 0) sentences.push(t('dlg.queued', { n: queuedDupCount }));
+        if (dupReqCount > 0) sentences.push(t('dlg.dupSel', { n: dupReqCount }));
+        text.textContent = sentences.join(' ');
         modal.classList.add('show');
 
-        const updateSummary = () => {
+        const updateSummary = (visible) => {
           let overwrite = 0;
-          let visible = 0;
-          let visibleOverwrite = 0;
           for (const ent of entries) {
-            const isVisible = ent.row.style.display !== 'none';
             if (ent.cb.checked) overwrite++;
-            if (isVisible) {
-              visible += 1;
-              if (ent.cb.checked) visibleOverwrite += 1;
-            }
           }
           const keep = entries.length - overwrite;
-          const visibleKeep = visible - visibleOverwrite;
-          summary.textContent =
-            `Overwrite: ${overwrite} • Keep: ${keep} • Visible overwrite: ${visibleOverwrite} • Visible keep: ${visibleKeep}`;
+          summary.textContent = visible < entries.length
+            ? t('dlg.summaryShowing', { replace: overwrite, keep, shown: visible, total: entries.length })
+            : t('dlg.summary', { replace: overwrite, keep });
         };
 
         const syncAllToggleState = () => {
-          // Rows hidden by the selection filter are deliberately excluded:
-          // one click on "Overwrite all" must never flip rows off screen.
+          // Rows hidden by the filter are deliberately excluded: one click on
+          // "Replace all" must never flip rows off screen.
           const targets = entries.filter((ent) => !ent.cb.disabled && !!ent._visibleMatch);
           const selectedAny = entries.some((ent) => !ent.cb.disabled && !!ent.cb.checked);
           if (targets.length === 0) {
@@ -2820,23 +3465,19 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
           let visibleFolders = 0;
           folderRows.forEach((meta, key) => {
-            const hasVisibleFiles = (visibleByFolder.get(key) || 0) > 0;
-            const show = hasVisibleFiles;
+            const show = (visibleByFolder.get(key) || 0) > 0;
             meta.row.style.display = show ? '' : 'none';
             if (show) visibleFolders += 1;
           });
 
-          const scopeLabel = scope === 'files' ? 'files' : (scope === 'folders' ? 'folders' : 'both');
-          const selLabel =
-            selectionMode === 'selected'
-              ? 'selected'
-              : selectionMode === 'unselected'
-                ? 'unselected'
-                : 'all';
-          filterMeta.textContent = q
-            ? `Filter (${scopeLabel}, ${selLabel}): files ${visible}/${entries.length}, folders ${visibleFolders}/${folderRows.size}`
-            : `Visible (${scopeLabel}, ${selLabel}): files ${visible}/${entries.length}, folders ${visibleFolders}/${folderRows.size}`;
-          updateSummary();
+          setText(filterMeta, t('dlg.filterMeta', {
+            files: visible, allFiles: entries.length,
+            folders: visibleFolders, allFolders: folderRows.size,
+          }));
+          // The list's minimum height follows the rows that are shown.
+          fileSection.style.setProperty('--n', String(Math.max(1, visible)));
+          setText(allLabel, t(visible < entries.length ? 'dlg.replaceShown' : 'dlg.replaceAll'));
+          updateSummary(visible);
           syncAllToggleState();
         };
         filterInput.oninput = applyFilter;
@@ -2857,17 +3498,47 @@ _HTML_TEMPLATE = r"""<!doctype html>
         syncFolderControls();
 
         const opener = document.activeElement;
+        // Tab and Shift+Tab cycle through the dialog; the page behind it
+        // cannot be reached while it is open.
+        const focusable = () => Array.from(modal.querySelectorAll(
+          'button, input, select, summary, [tabindex]'))
+          .filter((el) => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length > 0);
         const onKey = (ev) => {
-          if (ev.key === 'Escape') cleanup({ action: 'cancel' });
+          if (ev.key === 'Escape') {
+            ev.preventDefault();
+            cleanup({ action: 'cancel' });
+            return;
+          }
+          if (ev.key !== 'Tab') return;
+          const items = focusable();
+          if (!items.length) return;
+          const first = items[0];
+          const last = items[items.length - 1];
+          const active = document.activeElement;
+          if (!modal.contains(active)) {
+            ev.preventDefault();
+            first.focus();
+          } else if (ev.shiftKey && active === first) {
+            ev.preventDefault();
+            last.focus();
+          } else if (!ev.shiftKey && active === last) {
+            ev.preventDefault();
+            first.focus();
+          }
+        };
+        const onFocusIn = (ev) => {
+          if (!modal.contains(ev.target)) $('conflictOkBtn').focus();
         };
         const cleanup = (answer) => {
           modal.classList.remove('show');
           modal.setAttribute('aria-hidden', 'true');
           document.removeEventListener('keydown', onKey);
+          document.removeEventListener('focusin', onFocusIn);
           if (opener && opener.focus) opener.focus();
           resolve(answer);
         };
         document.addEventListener('keydown', onKey);
+        document.addEventListener('focusin', onFocusIn);
         modal.setAttribute('aria-hidden', 'false');
         $('conflictOkBtn').focus();
 
@@ -2886,6 +3557,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
     }
 
     async function enqueueJob(job) {
+      // From the first job on, the status bar stays for this page session.
+      $('statusBar').hidden = false;
       job.status = 'preflight';
       const selectedCount = (job.items || []).length;
       job.selectedCount = selectedCount;
@@ -2913,13 +3586,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
       job.queuedDupCount = skippedDuplicates;
       job.totalBytes = job.items.reduce((a, it) => a + (it.file.size || 0), 0);
       if (skippedDuplicates > 0) {
-        showPageError(
-          `Selected ${selectedCount} file(s): ${skippedDuplicates} already queued/in-progress and skipped.`
-        );
+        showPageError(t('page.queuedSkipped', { n: selectedCount, skipped: skippedDuplicates }));
       }
       if (job.items.length === 0) {
         job.status = 'done';
-        job.error = `Nothing new in queue (selected ${selectedCount}, duplicate targets ${skippedDuplicates}).`;
+        job.error = t('job.nothingNew', { n: selectedCount });
         queue.push(job);
         renderQueue();
         return;
@@ -2943,10 +3614,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
         const choice = await showConflictDialog(conflicts, {
           selectedCount,
           queuedDupCount: skippedDuplicates,
+          totalCount: job.items.length,
         });
         if (!choice || choice.action === 'cancel') {
           job.status = 'canceled';
-          job.error = 'Canceled (before upload)';
+          job.error = t('job.canceledBefore');
           renderQueue();
           return;
         }
@@ -2973,8 +3645,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         job.totalBytes = job.items.reduce((a, it) => a + (it.file.size || 0), 0);
         if (job.items.length === 0) {
           job.status = 'done';
-          const existsCount = (conflicts || []).filter(c => (c.reason || 'exists') === 'exists').length;
-          job.error = `Nothing to upload (selected ${selectedCount}, already on server ${existsCount}, skipped ${selectedCount - job.items.length}).`;
+          job.error = t('job.nothingToUpload', { n: selectedCount });
           renderQueue();
           return;
         }
@@ -3027,7 +3698,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
     // Every await in a running job is followed by this: Abort may have been
     // pressed while the job was waiting, and then nothing more may be sent.
     function ensureNotCanceled(job) {
-      if (job.status === 'canceled') throw makeError('Upload canceled', 'aborted');
+      if (job.status === 'canceled') throw makeError(t('err.canceled'), 'aborted');
     }
 
     // Waits ms, showing a countdown through label(secondsLeft). Rejects as soon
@@ -3037,7 +3708,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         const end = performance.now() + ms;
         const tick = () => {
           if (job.status === 'canceled') {
-            reject(makeError('Upload canceled', 'aborted'));
+            reject(makeError(t('err.canceled'), 'aborted'));
             return;
           }
           const left = end - performance.now();
@@ -3063,7 +3734,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         upload_id: job.id,
         items: job.items.map(it => ({ path: it.path, size: it.file.size || 0 })),
       });
-      let lastError = 'Server not reachable';
+      let lastError = t('err.noServer');
       for (let attempt = 1; attempt <= PREFLIGHT_ATTEMPTS; attempt++) {
         const reply = await fetchJson('api/preflight', {
           method: 'POST',
@@ -3073,9 +3744,13 @@ _HTML_TEMPLATE = r"""<!doctype html>
         if (reply && reply.status === 200 && reply.data && reply.data.ok) return reply.data;
         if (reply) {
           // The server answered: asking again would get the same answer.
-          return { ok: false, error: (reply.data && reply.data.error) || `HTTP ${reply.status}` };
+          return {
+            ok: false,
+            error: (reply.data && reply.data.error)
+              ? localizeServerError(reply.data.error) : t('err.http', { status: reply.status }),
+          };
         }
-        lastError = 'Server not reachable (the file list did not get through)';
+        lastError = t('err.noServerPre');
         if (attempt < PREFLIGHT_ATTEMPTS) await sleep(RETRY_BASE_DELAY_MS * attempt);
       }
       return { ok: false, error: lastError };
@@ -3104,11 +3779,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
         }
         const reader = new FileReader();
         let done = false;
-        const slow = setTimeout(() => setNote(job,
-          'Waiting for the file (still downloading?)'),
-          FILE_SLOW_NOTICE_MS);
+        const slow = setTimeout(() => setNote(job, t('note.waitFile')), FILE_SLOW_NOTICE_MS);
         const limit = setTimeout(() => finish(makeError(
-          'This device did not hand over the file in time', 'file')), FILE_READ_LIMIT_MS);
+          t('err.fileTimeout'), 'file')), FILE_READ_LIMIT_MS);
         function finish(err) {
           if (done) return;
           done = true;
@@ -3119,13 +3792,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
           if (err) reject(err); else resolve();
         }
         function cancel() {
-          finish(makeError('Upload canceled', 'aborted'));
+          finish(makeError(t('err.canceled'), 'aborted'));
         }
         activeCancel = cancel;
         reader.onload = () => finish(null);
-        reader.onerror = () => finish(makeError(
-          'This device could not read the file (moved, deleted, locked, or cloud-only while offline)',
-          'file'));
+        reader.onerror = () => finish(makeError(t('err.fileRead'), 'file'));
         reader.readAsArrayBuffer(item.file.slice(0, 1));
       });
     }
@@ -3208,14 +3879,15 @@ _HTML_TEMPLATE = r"""<!doctype html>
               return;
             }
             if (xhr.status === 409 && resp && resp.error === 'in_progress') {
-              settle(reject, makeError('Another upload is writing this file right now', 'http_error', 409));
+              settle(reject, makeError(t('err.otherWriting'), 'http_error', 409));
               return;
             }
             const ok = xhr.status === 200 && resp && resp.ok;
             if (!ok) {
               // responseText must not be touched while responseType is 'json':
               // per spec the getter throws InvalidStateError.
-              const msg = (resp && resp.error) ? resp.error : `HTTP ${xhr.status}`;
+              const msg = (resp && resp.error)
+                ? localizeServerError(resp.error) : t('err.http', { status: xhr.status });
               settle(reject, makeError(msg, xhr.status >= 500 ? 'http_5xx' : 'http_error', xhr.status));
               return;
             }
@@ -3224,11 +3896,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
             settle(reject, err instanceof Error ? err : new Error(String(err)));
           }
         };
-        xhr.onerror = () => settle(reject, makeError('Connection lost', 'network'));
-        xhr.ontimeout = () => settle(reject, makeError('Per-file time limit hit', 'timeout'));
+        xhr.onerror = () => settle(reject, makeError(t('err.connection'), 'network'));
+        xhr.ontimeout = () => settle(reject, makeError(t('err.timeout'), 'timeout'));
         xhr.onabort = () => settle(reject, stalled
-          ? makeError(`No data moved for ${Math.round(STALL_TIMEOUT_MS / 1000)} s`, 'stalled')
-          : makeError('Upload canceled', 'aborted'));
+          ? makeError(t('err.stalled', { s: Math.round(STALL_TIMEOUT_MS / 1000) }), 'stalled')
+          : makeError(t('err.canceled'), 'aborted'));
         xhr.send(item.file);
       });
     }
@@ -3257,8 +3929,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
     async function waitForServer(job, item) {
       let delay = SERVER_CHECK_MIN_MS;
       for (;;) {
-        await pause(job, delay, (sec) => `Server not reachable, next check in ${sec} s`);
-        setNote(job, 'Checking whether the server answers');
+        await pause(job, delay, (sec) => t('note.serverDown', { s: sec }));
+        setNote(job, t('note.checking'));
         if (await apiStatus(job, item)) return;
         delay = Math.min(SERVER_CHECK_MAX_MS, delay * 1.5);
       }
@@ -3301,6 +3973,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
             // files their turn. If nothing answers, the connection is down and
             // moving on would only fail every remaining file the same way.
             if (status) throw err;
+            // Bytes of the failed attempt must not stay in the progress bar
+            // while the queue waits for the server.
+            job.uploadedBytes = job.completedBytes;
+            renderStatus();
             await waitForServer(job, item);
             attempt = 1;
             lastCode = 'unreachable';
@@ -3315,7 +3991,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
           const nth = attempt;
           item.lastError = what;
           await pause(job, delay, (sec) =>
-            `${what}, retry ${nth}/${MAX_FILE_RETRIES} in ${sec} s`);
+            t('note.retry', { what, nth, max: MAX_FILE_RETRIES, s: sec }));
           attempt += 1;
         }
       }
@@ -3428,7 +4104,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         // more round at the end, after a pause that lets a shaky link settle.
         try {
           await pause(job, SECOND_PASS_DELAYS_MS[pass], (sec) =>
-            `${again.length} file(s) failed, trying again in ${sec} s`);
+            t('note.secondPass', { n: again.length, s: sec }));
         } catch (e) {
           break;
         }
@@ -3451,9 +4127,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
         const remaining = (job.items || []).filter(it => !it.done && !it.skipped);
         if (remaining.length > 0) {
           job.status = 'error';
-          job.error = (job.stoppedEarly
-            ? `Stopped after ${FAILURES_IN_A_ROW_LIMIT} files in a row failed. ` : '')
-            + `${remaining.length} file(s) not uploaded. Retry sends only those.`;
+          job.error = job.stoppedEarly
+            ? t('job.stopped', { n: remaining.length, limit: FAILURES_IN_A_ROW_LIMIT })
+            : t('job.notUploaded', { n: remaining.length });
         } else {
           job.status = 'done';
         }
@@ -3481,7 +4157,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
     $('abortBtn').addEventListener('click', () => {
       if (!activeJob) return;
       activeJob.status = 'canceled';
-      activeJob.error = 'Canceled';
+      activeJob.error = t('job.canceled');
       if (activeCancel) activeCancel();
       renderStatus(true);
     });
@@ -3507,8 +4183,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
 
     function filesLabel(files, nameOf) {
       return files.length === 1
-        ? `File: ${nameOf(files[0])}`
-        : `Files: ${files.length} (${nameOf(files[0])} ...)`;
+        ? t('label.file', { name: nameOf(files[0]) })
+        : t('label.files', { n: files.length, name: nameOf(files[0]) });
     }
 
     $('pickFilesBtn').addEventListener('click', () => $('singleFile').click());
@@ -3535,18 +4211,18 @@ _HTML_TEMPLATE = r"""<!doctype html>
       e.target.value = '';
       hidePageNotice();
       if (!files.length) {
-        showPageError('That folder contains no files, so there is nothing to upload.');
+        showPageError(t('page.emptyFolder'));
         return;
       }
       const byRoot = new Map();
       for (const f of files) {
         const rel = f.webkitRelativePath || f.name;
-        const root = rel.split('/')[0] || 'Folder';
+        const root = rel.split('/')[0] || t('label.folder', { name: '' }).replace(/:\s*$/, '');
         if (!byRoot.has(root)) byRoot.set(root, []);
         byRoot.get(root).push({ file: f, path: rel });
       }
       for (const [root, items] of byRoot) {
-        await enqueueJob(makeJob(`Folder: ${root}`, 'folder', items));
+        await enqueueJob(makeJob(t('label.folder', { name: root }), 'folder', items));
       }
     });
 
@@ -3616,10 +4292,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
         // Browser without the entries API: files only, no folder structure.
         const files = dt && dt.files ? Array.from(dt.files) : [];
         if (!files.length) return;
-        const label = files.length === 1
-          ? `File: ${files[0].name}`
-          : `Files: ${files.length} (${files[0].name} ...)`;
-        await enqueueJob(makeJob(label, 'files', files.map(f => ({ file: f, path: f.name }))));
+        await enqueueJob(makeJob(filesLabel(files, f => f.name), 'files',
+          files.map(f => ({ file: f, path: f.name }))));
         return;
       }
 
@@ -3630,7 +4304,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
         try {
           await collectEntry(entry, '', out);
         } catch (err) {
-          showPageError(`Could not read "${entry.name}": ${(err && err.message) || err}`);
+          showPageError(t('page.cannotRead', { name: entry.name, error: (err && err.message) || err }));
           continue;
         }
         if (!out.length) continue;
@@ -3639,24 +4313,23 @@ _HTML_TEMPLATE = r"""<!doctype html>
       }
 
       if (looseFiles.length) {
-        const label = looseFiles.length === 1
-          ? `File: ${looseFiles[0].path}`
-          : `Files: ${looseFiles.length} (${looseFiles[0].path} ...)`;
-        await enqueueJob(makeJob(label, 'files', looseFiles));
+        await enqueueJob(makeJob(filesLabel(looseFiles, f => f.path), 'files', looseFiles));
       }
       for (const folder of folders) {
-        await enqueueJob(makeJob(`Folder: ${folder.name}`, 'folder', folder.items));
+        await enqueueJob(makeJob(t('label.folder', { name: folder.name }), 'folder', folder.items));
       }
     });
 
     window.addEventListener('error', (e) => {
-      showPageError(`JS error: ${e.message || e.type}`);
+      showPageError(t('page.jsError', { error: e.message || e.type }));
     });
     window.addEventListener('unhandledrejection', (e) => {
       const reason = e && e.reason ? (e.reason.message || String(e.reason)) : 'unknown';
-      showPageError(`JS error: ${reason}`);
+      showPageError(t('page.jsError', { error: reason }));
     });
 
+    applyStaticText();
+    renderIntro();
     renderQueue();
   })();
   </script>
@@ -3784,6 +4457,7 @@ def run_server(
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     global _CASE_INSENSITIVE
     _CASE_INSENSITIVE = _probe_case_insensitive(UPLOAD_ROOT)
+    set_destination(UPLOAD_ROOT.name, platform.node())
     STATE.set_per_ip_limit(per_client_limit)
     _HTML_CONFIG["max_file_retries"] = max(0, int(retry_count))
     _HTML_CONFIG["retry_delay_ms"] = max(0, int(retry_delay_ms))
@@ -3916,7 +4590,11 @@ def _run_selftest(private_mode: bool = False) -> int:
         problems.append(f"GET / returned HTTP {status}")
     if not body[:200].lstrip().lower().startswith(b"<!doctype html"):
         problems.append("index page did not start with a HTML doctype")
-    for placeholder in (*_HTML_PLACEHOLDERS, "__CASE_INSENSITIVE_FS__"):
+    for placeholder in (
+        *_HTML_PLACEHOLDERS,
+        *_DESTINATION_PLACEHOLDERS,
+        "__CASE_INSENSITIVE_FS__",
+    ):
         if placeholder.encode() in body:
             problems.append(f"unreplaced template placeholder {placeholder}")
 
@@ -4026,6 +4704,18 @@ if __name__ == "__main__":
             f"(default: {DEFAULT_STALL_TIMEOUT_SEC}, 0 = never)"
         ),
     )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Also answer when addressed by this host name, for example the "
+            "domain of a reverse proxy; repeatable, '*' accepts every name. "
+            "IP addresses, localhost, names without a dot, .local names and "
+            "this computer's own name always work."
+        ),
+    )
     args = parser.parse_args()
     if args.selftest:
         raise SystemExit(_run_selftest(private_mode=args.private))
@@ -4044,6 +4734,7 @@ if __name__ == "__main__":
     UPLOAD_ROOT = Path(args.upload_dir).expanduser().resolve()
     if UPLOAD_ROOT.exists() and not UPLOAD_ROOT.is_dir():
         parser.error(f"--upload-dir is not a folder: {UPLOAD_ROOT}")
+    allow_hosts(args.allow_host)
     run_server(
         endpoints=endpoints,
         per_client_limit=max(1, args.per_client_limit),
