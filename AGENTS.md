@@ -6,8 +6,7 @@ in English. The existing MIT license remains authoritative.
 
 - Main server: `upload_server.py`, one file holding the server and its browser
   page so that it can be copied to any machine with Python. Keep it free of
-  third-party imports and of anything fetched at runtime. `legacy/` holds two
-  older variants for reference; they are not maintained.
+  third-party imports and of anything fetched at runtime.
 - Android: `android/`; its build generates `upload_server.py` from the main script.
   Never maintain a second copy of the browser UI or HTTP implementation.
 - Run `python -m unittest discover -s tests` after server changes.
