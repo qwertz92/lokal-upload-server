@@ -36,6 +36,7 @@ public final class LogActivity extends Activity {
     private boolean deferredRender;
     private List<String> shownEntries = Collections.emptyList();
     private ViewTreeObserver.OnPreDrawListener afterLayout;
+    private final Runnable serverChanged = () -> UploadService.applyKeepScreenOn(this);
     private final Runnable refresh = () -> {
         pending.set(false);
         if (visible) render();
@@ -79,12 +80,15 @@ public final class LogActivity extends Activity {
     @Override public void onStart() {
         super.onStart();
         visible = true;
+        UploadService.addListener(serverChanged);
+        UploadService.applyKeepScreenOn(this);
         ActivityLog.addListener(changed);
         render();
     }
 
     @Override public void onStop() {
         visible = false;
+        UploadService.removeListener(serverChanged);
         ActivityLog.removeListener(changed);
         main.removeCallbacks(refresh);
         pending.set(false);
@@ -122,6 +126,8 @@ public final class LogActivity extends Activity {
         int previous = restoring ? restoreY : scroll.getScrollY();
         boolean follow = !restoring && !scroll.canScrollVertically(1);
         int target = entries.isEmpty() ? 0 : previous;
+        int anchor = -1;
+        int anchorDelta = 0;
         if (!restoring && !follow && !entries.isEmpty() && !shownEntries.isEmpty()) {
             int removed = 0;
             int offset = 0;
@@ -131,8 +137,19 @@ public final class LogActivity extends Activity {
             }
             Layout layout = text.getLayout();
             if (removed == shownEntries.size() || layout == null) target = 0;
-            else if (removed > 0) target = Math.max(0,
-                    previous - layout.getLineTop(layout.getLineForOffset(offset)));
+            else if (removed > 0) {
+                // Anchor the reader's top line by text position and re-measure it in the new layout:
+                // the first line carries the font's extra top padding, so subtracting the evicted
+                // height alone drifts the view by that padding on every update.
+                int line = layout.getLineForVertical(previous);
+                int start = layout.getLineStart(line);
+                if (start >= offset) {
+                    anchor = start - offset;
+                    anchorDelta = previous - layout.getLineTop(line);
+                } else {
+                    target = 0;
+                }
+            }
         }
         restoreY = -1;
         shownEntries = entries;
@@ -140,13 +157,18 @@ public final class LogActivity extends Activity {
         text.setText(entries.isEmpty() ? getString(R.string.log_empty) : String.join("\n", entries));
         copy.setEnabled(!entries.isEmpty());
         clear.setEnabled(!entries.isEmpty());
-        int targetY = target;
+        int fallbackY = target;
+        int anchorOffset = anchor;
+        int delta = anchorDelta;
         // setText can reset ScrollView position; restore only after the new height is known.
         afterLayout = () -> {
             removeAfterLayout();
             if (visible) {
                 int bottom = Math.max(0, text.getHeight() - scroll.getHeight()
                         + scroll.getPaddingTop() + scroll.getPaddingBottom());
+                Layout layout = text.getLayout();
+                int targetY = anchorOffset >= 0 && layout != null
+                        ? layout.getLineTop(layout.getLineForOffset(anchorOffset)) + delta : fallbackY;
                 scroll.scrollTo(0, follow ? bottom : targetY);
             }
             return true;

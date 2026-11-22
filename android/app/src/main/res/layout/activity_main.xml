@@ -53,6 +53,10 @@
             android:textAppearance="?android:attr/textAppearanceSmall" />
         <Button android:id="@+id/open_logs" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:minHeight="56dp" android:text="@string/open_logs" />
+        <CheckBox android:id="@+id/keep_screen_on" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:minHeight="48dp" android:text="@string/keep_screen_on" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/keep_screen_on_help" />
         <CheckBox android:id="@+id/privacy" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="24dp" android:minHeight="48dp" android:text="@string/privacy_mode" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content"

@@ -10,7 +10,7 @@ import java.util.regex.Pattern;
 
 /** A per-run Python sink backed by one bounded, process-local event buffer. */
 public final class ActivityLog {
-    static final int LIMIT = 200;
+    static final int LIMIT = 500;
     static final int MESSAGE_LIMIT = 1024;
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT);
     private static final Pattern URI = Pattern.compile("(?i)(?:https?://|content://)\\S+");

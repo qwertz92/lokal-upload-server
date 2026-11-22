@@ -80,8 +80,11 @@ class Smoke:
         self.require(payload.get("ok") is True, f"preflight failed: {payload}")
         return payload
 
-    def upload(self, rel, body, policy="overwrite"):
-        query = urlencode({"upload_id": self.run, "path": rel, "on_exists": policy})
+    def upload(self, rel, body, policy="overwrite", client=None, headers=None):
+        params = {"upload_id": self.run, "path": rel, "on_exists": policy}
+        if client is not None:
+            params["client"] = client
+        query = urlencode(params)
         if isinstance(body, bytes):
             size = len(body)
         else:
@@ -89,7 +92,26 @@ class Smoke:
             body.seek(0)
         return self.request("POST", "api/upload?" + query, body,
                             headers={"Content-Type": "application/octet-stream",
-                                     "Content-Length": str(size)})
+                                     "Content-Length": str(size), **(headers or {})})
+
+    def status(self, rel, client=None, base=None):
+        params = {"upload_id": self.run, "path": rel}
+        if client is not None:
+            params["client"] = client
+        status, data = self.request("GET", "api/status?" + urlencode(params), base=base)
+        return status, (json.loads(data) if status == 200 else data)
+
+    def hung_upload(self, rel, client, size=4 * 1024 * 1024):
+        """Open an upload that sends part of its body and then goes silent."""
+        query = urlencode({"upload_id": self.run, "path": rel, "on_exists": "overwrite",
+                           "client": client})
+        connection = socket.create_connection((self.url.hostname, self.url.port or 80),
+                                              timeout=self.args.timeout)
+        connection.settimeout(self.args.timeout)
+        header = (f"POST {self.url.path}api/upload?{query} HTTP/1.1\r\nHost: smoke\r\n"
+                  f"Content-Length: {size}\r\nContent-Type: application/octet-stream\r\n\r\n")
+        connection.sendall(header.encode("ascii") + b"hung" * 16384)
+        return connection
 
     @staticmethod
     def require(condition, message):
@@ -158,8 +180,9 @@ class Smoke:
         if self.args.privacy_mode:
             rejected_bases.append("/")
         for base in rejected_bases:
-            for method, suffix in (("GET", ""), ("POST", "api/preflight"),
-                                   ("POST", "api/upload?" + query)):
+            status_query = urlencode({"upload_id": self.run, "path": unauthorized})
+            for method, suffix in (("GET", ""), ("GET", "api/status?" + status_query),
+                                   ("POST", "api/preflight"), ("POST", "api/upload?" + query)):
                 status, _ = self.request(method, suffix, b"" if method == "POST" else None,
                                          base=base)
                 self.require(status == 404, f"Rejected prefix accepted: {method} {suffix} returned {status}")
@@ -170,11 +193,13 @@ class Smoke:
         status, body = self.request("GET")
         html = body.decode("utf-8")
         self.require(status == 200 and "<!doctype html>" in html.lower(), "Browser page did not load")
-        self.require("fetch('api/preflight'" in html and "`api/upload?" in html
-                     and not re.search(r"(?:fetch|open)\([^\n]*['\"`]/api/", html),
+        self.require("'api/preflight'" in html and "`api/${route}?" in html
+                     and "apiUrl('upload'" in html and "apiUrl('status'" in html
+                     and not re.search(r"['\"`]/api/", html),
                      "Browser JavaScript does not use relative upload endpoints")
-        self.require(not re.search(r"<(?:script|link|img)\b[^>]*(?:src|href)\s*=", html,
-                                   re.IGNORECASE)
+        # An inline data: URL (the empty favicon) loads nothing from elsewhere.
+        self.require(not re.search(r"<(?:script|link|img)\b[^>]*(?:src|href)\s*=\s*(?!['\"]?data:)",
+                                   html, re.IGNORECASE)
                      and not re.search(r"@import\b|url\(\s*['\"]?https?://", html, re.IGNORECASE),
                      "Browser page depends on external resources")
         self.passed("self-contained browser page and relative upload endpoints", html_bytes=len(body))
@@ -185,6 +210,33 @@ class Smoke:
         self.passed("nested binary and Unicode upload", **self.files[rel])
         self.put(self.run + "/empty.bin", b"")
         self.passed("zero-byte upload")
+
+        status, payload = self.status(rel, client="smoke-status")
+        self.require(status == 200 and payload.get("done") is True
+                     and payload.get("bytes") == self.files[rel]["bytes"]
+                     and payload.get("sha256") == self.files[rel]["sha256"],
+                     f"Status does not report the stored file: {status}, {payload}")
+        status, payload = self.status(self.run + "/never-sent.bin")
+        self.require(status == 200 and payload.get("done") is False,
+                     f"Status reports an unsent file as stored: {status}, {payload}")
+        self.passed("status reports stored and unsent files", **self.files[rel])
+
+        cross = self.run + "/cross-origin.bin"
+        self.files[cross] = {}
+        foreign = {"Origin": "http://attacker.example"}
+        body = json.dumps({"upload_id": self.run, "items": [{"path": cross, "size": 1}]}).encode()
+        status, _ = self.request("POST", "api/preflight", body,
+                                 headers={"Content-Type": "application/json", **foreign})
+        self.require(status == 403, f"Cross-origin preflight returned {status}")
+        status, _ = self.upload(cross, b"x", headers=foreign)
+        self.require(status == 403, f"Cross-origin upload returned {status}")
+        self.require(self.device_path(cross) not in self.listing(), "Cross-origin upload was stored")
+        self.files.pop(cross)
+        own = {"Origin": f"http://{self.url.netloc}"}
+        status, _ = self.request("POST", "api/preflight", body,
+                                 headers={"Content-Type": "application/json", **own})
+        self.require(status == 200, f"Same-origin preflight returned {status}")
+        self.passed("cross-origin POST refused, same-origin POST accepted")
 
         conflict = self.preflight(rel, 7)
         self.require(any(item.get("rel_path") == rel and item.get("reason") == "exists"
@@ -232,6 +284,33 @@ class Smoke:
 
         retries = self.put(self.run + "/after-failure.txt", b"server remains usable\n", wait=5)
         self.passed("server accepts uploads after rejected and aborted requests", busy_retries=retries)
+
+        # A browser tab whose upload hung retries with the same client id.
+        hung_rel = self.run + "/superseded.bin"
+        self.files[hung_rel] = {}
+        self.preflight(hung_rel, 4 * 1024 * 1024)
+        hung = self.hung_upload(hung_rel, "smoke-tab-one")
+        try:
+            time.sleep(1)
+            other = self.run + "/other-tab.bin"
+            self.files[other] = {}
+            status, body = self.upload(other, b"other tab", client="smoke-tab-two")
+            self.require(status == 429, f"Another client's upload was not held back: {status}, {body!r}")
+            self.files.pop(other)
+            fresh = b"retried after a hung request\n"
+            started = time.monotonic()
+            status, body = self.upload(hung_rel, fresh, client="smoke-tab-one")
+            took = round(time.monotonic() - started, 3)
+            self.require(status == 200, f"Same-client retry did not supersede: {status}, {body!r}")
+            # EOF proves the server ended the superseded request instead of leaving it waiting.
+            while hung.recv(4096):
+                pass
+        finally:
+            hung.close()
+        self.verify(hung_rel, len(fresh), hashlib.sha256(fresh).hexdigest())
+        self.no_temporary_files(wait=5)
+        self.passed("same-client retry supersedes a hung upload; another client gets 429",
+                    retry_seconds=took)
         large_rel = self.run + "/large.bin"
         self.files[large_rel] = {}
         size = self.args.large_mib * 1024 * 1024

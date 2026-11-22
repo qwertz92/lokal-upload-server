@@ -46,12 +46,13 @@ public final class ActivityLogCheck {
         oldRun.log("Late event after this run closed");
         assert ActivityLog.latest().equals(beforeClosed) : "Closed run must not append stale events";
         ActivityLog.clear();
-        for (int index = 0; index < 250; index++) plain.log("event " + index);
+        assert ActivityLog.LIMIT == 500 : "200 entries cut off a 36-file diagnostic log";
+        for (int index = 0; index < 600; index++) plain.log("event " + index);
         List<String> bounded = ActivityLog.entries();
-        assert bounded.size() == 200 : "Buffer must evict oldest events";
-        assert bounded.get(0).endsWith("event 50") && bounded.get(199).endsWith("event 249");
+        assert bounded.size() == 500 : "Buffer must evict oldest events";
+        assert bounded.get(0).endsWith("event 100") && bounded.get(499).endsWith("event 599");
         bounded.clear();
-        assert ActivityLog.entries().size() == 200 : "Readers must receive independent snapshots";
+        assert ActivityLog.entries().size() == 500 : "Readers must receive independent snapshots";
 
         AtomicReference<Throwable> failure = new AtomicReference<>();
         List<Thread> threads = new ArrayList<>();
@@ -62,7 +63,7 @@ public final class ActivityLogCheck {
                     for (int event = 0; event < 250; event++) {
                         plain.log("worker " + id + " event " + event);
                         List<String> snapshot = ActivityLog.entries();
-                        assert snapshot.size() <= 200;
+                        assert snapshot.size() <= 500;
                         assert snapshot.stream().allMatch(value -> value != null && value.length() >= 9
                                 && value.charAt(2) == ':' && value.charAt(5) == ':');
                     }
@@ -74,7 +75,7 @@ public final class ActivityLogCheck {
         for (Thread thread : threads) thread.start();
         for (Thread thread : threads) thread.join();
         assert failure.get() == null : failure.get();
-        assert ActivityLog.entries().size() == 200;
+        assert ActivityLog.entries().size() == 500;
         ActivityLog.clear();
         assert ActivityLog.entries().isEmpty() && ActivityLog.latest() == null;
         System.out.println("Activity log bounds, sanitization, redaction and concurrency checks passed");

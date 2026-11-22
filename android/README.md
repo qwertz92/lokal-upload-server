@@ -4,8 +4,10 @@ To install the already signed APK, use the [phone installation instructions](../
 Building and signing are only needed for development or a new release.
 
 The native Java app embeds CPython 3.14 through Chaquopy 17.0.0. Its Gradle copy
-task packages the repository's main Python server as `upload_server.py`; generated
-copies belong only in `app/build/`. The app supports Android 8 or newer (API 26),
+task packages the repository's main Python server, `../upload_server.py`, under the
+same name; generated copies belong only in `app/build/`. The Android wrapper
+`app/src/main/python/android_server.py` imports it and adds only SAF storage, the
+connection limit and the log sink. The app supports Android 8 or newer (API 26),
 ARM64 phones and x86-64 emulators, and targets Android 17 (API 37).
 
 ## Build
@@ -65,9 +67,16 @@ The reported certificate SHA-256 must match the value above. On HomeBase:
 
 ```fish
 set -gx JAVA_HOME /usr/lib/jvm/java-21-openjdk
+set -gx LC_ALL C.UTF-8
 set -gx LOCAL_UPLOAD_SIGNING_PROPERTIES /mnt/c/Users/thoma/.android/keystores/local-upload-server/signing.properties
 timeout 1200 ./gradlew --no-daemon --warning-mode all lintRelease assembleRelease
 ```
+
+Gradle must run under a UTF-8 locale. Chaquopy builds a Python 3.14 virtual
+environment whose `bin/` contains the non-ASCII `𝜋thon` link; under the POSIX
+locale the JVM's file-name encoding is ASCII and `extractReleasePythonBuildPackages`
+fails with "Failed to create MD5 hash for file". The build machine's WSL has only the
+`C.UTF-8` locale, so `LC_ALL=C.UTF-8` is set explicitly (measured 2026-11-22).
 
 Alternatively pass `-PlocalUploadSigningProperties=/absolute/signing.properties`.
 The signed APK is generated at `app/build/outputs/apk/release/app-release.apk`.
@@ -99,14 +108,35 @@ Gradle 10 until its plugin has migrated these APIs. No app lint baseline is used
 - `SafStorage(Context, persistedTreeUri).validate()` checks the selected folder.
 
 The optional fourth argument is a per-run Java sink exposing `log(String)`.
-HTTP worker threads send events to a bounded in-memory log (200 entries, up to
+HTTP worker threads send events to a bounded in-memory log (500 entries, up to
 1024 message characters each); foreground UI listeners coalesce updates. The
 capability and URLs are redacted before display/copy. Log callbacks must never
 change an HTTP response or interrupt storage work. Logs survive server stop and
 activity recreation, but not app-process termination; there is no disk log.
 
+`android_server.py` serves at most `MAX_CONNECTIONS = 24` connections at once and
+refuses further ones (logged at most once per 5 seconds). Request bodies use the
+desktop server's shared 120-second idle timeout (`BODY_IDLE_TIMEOUT_SEC`); the
+former Android-only 30-second body timeout no longer exists.
+
 The service enters the foreground before initializing Python, acquires a timed
-CPU wake lock renewed while active, and cleans up on explicit stop or destruction.
+CPU wake lock renewed while active, and a non-reference-counted Wi-Fi lock in
+`WIFI_MODE_FULL_HIGH_PERF` mode. Both locks are released together on explicit stop,
+start failure or destruction. With the screen off, Android may put the Wi-Fi radio
+into power-save mode, which can stall transfers for many seconds. The
+high-performance mode is the only one documented as effective with the screen off
+(API 26-33). Android 14 (API 34) deprecated it and automatically replaces it with
+`WIFI_MODE_FULL_LOW_LATENCY`, which is active only while the screen is on and the
+app is in the foreground. The deprecated constant is therefore requested in one
+helper with a narrow `@SuppressWarnings("deprecation")`.
+
+Because a Wi-Fi lock only helps with the screen on from Android 14, the main screen
+has a **Keep screen on while the server runs** checkbox (preference
+`keep_screen_on`, default on). While the server is starting or running and the
+option is on, the main and log activities set `FLAG_KEEP_SCREEN_ON` on their
+window; otherwise they clear it. Unlike Privacy mode, it may be changed while the
+server runs and takes effect immediately. The flag affects only the app's own
+visible window: it does not keep the screen on after the user leaves the app.
 Launching from the app icon starts a previously configured server; an ordinary
 activity resume does not restart it. The notification's stop action uses
 the same shutdown path. The service is deliberately non-sticky and has no boot
@@ -175,9 +205,13 @@ request, upload success, rejection and abort events, then background/reopen the
 activity and stop the server: existing entries must remain. Copy must match the
 log, Clear must empty it, and individual events must not post notifications.
 
-Fill the log past 200 entries using actual requests. Without touching the view,
+Fill the log past 500 entries using actual requests. Without touching the view,
 it must follow the newest event. Scroll to a middle event that will remain in the
 buffer, append a few more events, and compare that same visible event and its
 vertical position before/after. Repeat while dragging. Comparing only the fixed
 button bounds or an oldest event that was legitimately evicted misses the scroll
-regression. Check German/light/dark and large text with the final signed APK.
+regression. Use distinct rows (uploads with different names): identical rows hide a
+shift. A pixel comparison of the log viewport, excluding the scrollbar, also catches
+small drifts; it found a drift of several pixels per update in the 0.1.2 offset
+arithmetic, which subtracted evicted height instead of re-measuring the top line.
+Check German/light/dark and large text with the final signed APK.

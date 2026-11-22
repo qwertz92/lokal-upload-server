@@ -6,6 +6,8 @@
     <string name="choose_folder">Ordner wählen</string>
     <string name="open_folder">Ordner öffnen</string>
     <string name="server_heading">Server</string>
+    <string name="keep_screen_on">Bildschirm anlassen, solange der Server läuft</string>
+    <string name="keep_screen_on_help">Übertragungen können sehr langsam werden oder hängen bleiben, wenn der Bildschirm ausgeht, weil Android dann beim WLAN Strom spart.</string>
     <string name="privacy_mode">Privatmodus</string>
     <string name="privacy_help">Aus: IP + Port. An: geheimer Link. Zum Ändern den Server stoppen.</string>
     <string name="server_stopped">Gestoppt. Tippe auf Start, um Uploads anzunehmen.</string>
@@ -35,7 +37,7 @@
     <string name="licenses_error">Die enthaltenen Lizenzhinweise konnten nicht geöffnet werden.</string>
     <string name="open_logs">Protokoll öffnen</string>
     <string name="log_title">Aktivitätsprotokoll</string>
-    <string name="log_help">Letzte 200 Ereignisse dieser App-Sitzung; beim Beenden des App-Prozesses gelöscht. HTTP-Anfragen zeigen beobachtete Aktivität, keine dauerhaft verbundenen Geräte.</string>
+    <string name="log_help">Letzte 500 Ereignisse dieser App-Sitzung; beim Beenden des App-Prozesses gelöscht. HTTP-Anfragen zeigen beobachtete Aktivität, keine dauerhaft verbundenen Geräte.</string>
     <string name="log_empty">Noch keine Ereignisse.</string>
     <string name="log_copy">Kopieren</string>
     <string name="log_clear">Leeren</string>

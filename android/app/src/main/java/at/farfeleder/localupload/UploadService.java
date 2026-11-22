@@ -1,6 +1,7 @@
 package at.farfeleder.localupload;
 
 import android.Manifest;
+import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -16,11 +17,13 @@ import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.view.WindowManager;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -44,6 +47,7 @@ public final class UploadService extends Service {
     static final String PREFERENCES = "upload";
     static final String FOLDER_KEY = "folder";
     static final String PRIVACY_KEY = "privacy";
+    static final String KEEP_SCREEN_ON_KEY = "keep_screen_on";
     static final int STOPPED = 0;
     static final int STARTING = 1;
     static final int RUNNING = 2;
@@ -78,6 +82,15 @@ public final class UploadService extends Service {
         return snapshot;
     }
 
+    /** Keeps an app window awake while the server starts or runs, if the user enabled that option. */
+    static void applyKeepScreenOn(Activity activity) {
+        int state = snapshot.state;
+        boolean keep = (state == STARTING || state == RUNNING) && activity
+                .getSharedPreferences(PREFERENCES, MODE_PRIVATE).getBoolean(KEEP_SCREEN_ON_KEY, true);
+        if (keep) activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
     static void addListener(Runnable listener) {
         LISTENERS.add(listener);
     }
@@ -91,6 +104,7 @@ public final class UploadService extends Service {
     private final Map<Network, LinkProperties> networks = new LinkedHashMap<>();
     private ConnectivityManager connectivity;
     private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
     private boolean destroyed;
     private boolean callbackRegistered;
     private String token;
@@ -134,6 +148,11 @@ public final class UploadService extends Service {
         wakeLock = getSystemService(PowerManager.class).newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK, "LocalUpload:server");
         wakeLock.setReferenceCounted(false);
+        WifiManager wifi = getApplicationContext().getSystemService(WifiManager.class);
+        if (wifi != null) {
+            wifiLock = newHighPerformanceWifiLock(wifi);
+            wifiLock.setReferenceCounted(false);
+        }
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel(
                 CHANNEL, getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW));
         NetworkRequest request = new NetworkRequest.Builder()
@@ -189,6 +208,7 @@ public final class UploadService extends Service {
             }
             main.removeCallbacks(renewWakeLock);
             renewWakeLock.run();
+            if (wifiLock != null) wifiLock.acquire();
         } catch (RuntimeException failure) {
             fail(message(failure, runToken));
             return;
@@ -352,9 +372,23 @@ public final class UploadService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFICATION, notification());
     }
 
+    /*
+     * With the screen off, Android may put the Wi-Fi radio into power-save mode, which can stall
+     * request bodies and responses for many seconds. WIFI_MODE_FULL_HIGH_PERF is the only lock mode
+     * documented as effective with the screen off (API 26-33). It is deprecated in API 34, where the
+     * platform automatically replaces it with WIFI_MODE_FULL_LOW_LATENCY, which is only active while
+     * the screen is on and the app is in the foreground (hence the keep-screen-on option). Requesting
+     * the deprecated mode therefore gives the best behaviour on every supported API level.
+     */
+    @SuppressWarnings("deprecation")
+    private static WifiManager.WifiLock newHighPerformanceWifiLock(WifiManager wifi) {
+        return wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LocalUpload:server");
+    }
+
     private void releaseWakeLock() {
         main.removeCallbacks(renewWakeLock);
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
     }
 
     @Override public void onDestroy() {

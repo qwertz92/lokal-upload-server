@@ -49,6 +49,7 @@ public final class MainActivity extends Activity {
     private Button copy;
     private Button share;
     private CheckBox privacy;
+    private CheckBox keepScreenOn;
     private boolean pendingStart;
     private final Runnable update = this::render;
     private final Handler logMain = new Handler(Looper.getMainLooper());
@@ -76,6 +77,12 @@ public final class MainActivity extends Activity {
         copy = findViewById(R.id.copy);
         share = findViewById(R.id.share);
         privacy = findViewById(R.id.privacy);
+        keepScreenOn = findViewById(R.id.keep_screen_on);
+        // Unlike Privacy mode, this applies immediately, also while the server runs.
+        keepScreenOn.setOnCheckedChangeListener((button, checked) -> {
+            preferences().edit().putBoolean(UploadService.KEEP_SCREEN_ON_KEY, checked).apply();
+            UploadService.applyKeepScreenOn(this);
+        });
         privacy.setOnCheckedChangeListener((button, checked) -> {
             if (!UploadService.snapshot().active()) {
                 preferences().edit().putBoolean(UploadService.PRIVACY_KEY, checked).apply();
@@ -192,6 +199,8 @@ public final class MainActivity extends Activity {
         choose.setEnabled(!current.active());
         privacy.setChecked(preferences().getBoolean(UploadService.PRIVACY_KEY, false));
         privacy.setEnabled(!current.active());
+        keepScreenOn.setChecked(preferences().getBoolean(UploadService.KEEP_SCREEN_ON_KEY, true));
+        UploadService.applyKeepScreenOn(this);
         open.setEnabled(selected != null);
         start.setEnabled(!current.active());
         stop.setEnabled(current.state == UploadService.STARTING || current.state == UploadService.RUNNING);
