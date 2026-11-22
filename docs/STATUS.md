@@ -16,6 +16,8 @@ Download: [LocalUpload-0.2.1.apk](https://github.com/qwertz92/lokal-upload-serve
 SHA-256: `da55a77fd9082ec94353bc2e6683e4abd70e90fcdf7d4262aca5ed0ace8d4a9a`,
 signed with the original release certificate
 (`65aa570406522f3ea7ca5920ee45c21392b58573a0597894b202c7f9ea373e5f`).
+The anonymous public APK and its [checksum file](https://github.com/qwertz92/lokal-upload-server/releases/download/v0.2.1/LocalUpload-0.2.1.apk.sha256)
+were downloaded and match the tested artifact byte-for-byte.
 
 | Required outcome | Acceptance evidence | State |
 | --- | --- | --- |

@@ -2,7 +2,7 @@
 
 ## 2026-11-23 — Android lookups, host names and a bilingual page: 0.2.1
 
-Published `v0.2.1` with its original-key signed APK and checksum.
+Published `v0.2.1` with its original-key signed APK and checksum; the anonymous public download matches the tested bytes.
 
 Trigger: the measurements for 0.2.0 had shown that an upload to the Android app cost 0.27 s into an empty folder and 11.2 s into one with 1000 files, because every path lookup listed the whole parent folder and one upload made several. The app now asks the document provider for a child by the id it predicts from the path; an upload costs 0.12 to 0.15 s whatever the folder holds. The same rework made the app treat `CaseProbe.txt` and `caseprobe.txt` as one file, as Android's storage does; 0.2.0 answered such an upload with 500.
 
