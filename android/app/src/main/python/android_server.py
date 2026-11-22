@@ -78,7 +78,7 @@ class _SafStorage:
 def _safe_log(message, token):
     if token is not None:
         message = message.replace(token.decode("ascii"), "[hidden]")
-    if message.startswith(("New client:", "Upload started:")):
+    if message.startswith("New client:"):
         message = message.partition(" ua=")[0]
     if "invalid literal for int() with base 10:" in message:
         message = message.partition("invalid literal for int() with base 10:")[0] + "invalid numeric parameter"
@@ -88,8 +88,6 @@ def _safe_log(message, token):
 
 
 class _Handler(upload_server.SimpleUploadServer):
-    timeout = 30
-
     def _log(self, message, *, color=None):
         # Capability URLs never belong in Android's process logs.
         if self.server.log_sink is not None:
@@ -102,6 +100,14 @@ class _Handler(upload_server.SimpleUploadServer):
         elif message.startswith("Upload error:"):
             print("Android upload failed", file=sys.stderr, flush=True)
 
+# Connections served at once. A browser keeps up to six per server plus spares
+# it opened in advance, and a retry arrives while the request it replaces is
+# still being torn down, so eight (the value until 0.1.2) could run out with a
+# single client and refuse connections without a trace.
+MAX_CONNECTIONS = 24
+_REFUSAL_LOG_INTERVAL_SEC = 5
+
+
 class _AndroidHTTPServer(upload_server._UploadHTTPServer):
     daemon_threads = True
     block_on_close = False
@@ -111,13 +117,15 @@ class _AndroidHTTPServer(upload_server._UploadHTTPServer):
         self.state = upload_server._ServerState()
         self.token = token.encode("ascii") if token is not None else None
         self.log_sink = log_sink
-        self._slots = threading.BoundedSemaphore(8)
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self._last_refusal_log = 0.0
         self._clients = set()
         self._clients_changed = threading.Condition()
         super().__init__(address, _Handler)
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
+            self._log_refusal(client_address)
             self.shutdown_request(request)
             return
         with self._clients_changed:
@@ -127,6 +135,19 @@ class _AndroidHTTPServer(upload_server._UploadHTTPServer):
         except Exception:
             self._finished(request)
             raise
+
+    def _log_refusal(self, client_address):
+        # At most one line per interval: a flood must not evict the whole log.
+        now = time.monotonic()
+        if self.log_sink is None or now - self._last_refusal_log < _REFUSAL_LOG_INTERVAL_SEC:
+            return
+        self._last_refusal_log = now
+        try:
+            self.log_sink.log(_safe_log(
+                f"Connection refused: ip={client_address[0]} reason=all "
+                f"{MAX_CONNECTIONS} connections in use", self.token))
+        except Exception:
+            print("Android activity log callback failed", file=sys.stderr, flush=True)
 
     def _finished(self, request):
         with self._clients_changed:
@@ -141,6 +162,9 @@ class _AndroidHTTPServer(upload_server._UploadHTTPServer):
             self._finished(request)
 
     def close_clients(self):
+        # Body reads poll this flag, so they end even where shutting a socket
+        # down from another thread does not wake its reader.
+        self.state.stop()
         with self._clients_changed:
             clients = list(self._clients)
         for client in clients:

@@ -20,7 +20,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "upload_server.py"
 
 class DesktopPrivacyTest(unittest.TestCase):
     @contextlib.contextmanager
-    def running_cli(self, private=False, listeners=1):
+    def running_cli(self, private=False, listeners=1, extra_args=()):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             sockets = [socket.socket() for _ in range(listeners)]
@@ -37,6 +37,7 @@ class DesktopPrivacyTest(unittest.TestCase):
             else:
                 for port in ports:
                     args += ["--listen", f"127.0.0.1:{port}"]
+            args += [str(a) for a in extra_args]
             if private:
                 args.append("--private")
             log = root / "server.log"
@@ -85,7 +86,7 @@ class DesktopPrivacyTest(unittest.TestCase):
             self.assertEqual(urlparse(url).path, "")
             status, html = self.request(url)
             self.assertEqual(status, 200)
-            self.assertIn(b"fetch('api/preflight'", html)
+            self.assertIn(b"fetchJson('api/preflight'", html)
             payload = bytes(range(256)) * 17
             body = json.dumps({"upload_id": "desktop-normal", "items": [
                 {"path": "folder/plain.bin", "size": len(payload)}
@@ -96,6 +97,29 @@ class DesktopPrivacyTest(unittest.TestCase):
             status, body = self.request(url, "POST", f"/api/upload?{query}", payload)
             self.assertEqual(status, 200, body)
             self.assertEqual((root / "uploads/folder/plain.bin").read_bytes(), payload)
+
+    def test_cli_upload_dir_receives_files_and_page_has_no_open_placeholder(self):
+        with tempfile.TemporaryDirectory() as target:
+            custom = Path(target) / "received"
+            with self.running_cli(extra_args=["--upload-dir", custom]) as (root, urls):
+                status, html = self.request(urls[0])
+                self.assertEqual(status, 200)
+                self.assertEqual(re.findall(rb"__[A-Z][A-Z0-9_]*__", html), [])
+                payload = bytes(range(256)) * 21
+                query = urlencode({"upload_id": "desktop-dir", "path": "in/dir.bin"})
+                status, body = self.request(urls[0], "POST", f"/api/upload?{query}", payload)
+                self.assertEqual(status, 200, body)
+                self.assertEqual((custom / "in/dir.bin").read_bytes(), payload)
+                self.assertFalse((root / "uploads").exists())
+
+    def test_cli_defaults_and_stall_timeout_are_rendered_into_the_page(self):
+        with self.running_cli() as (_, urls):
+            _, html = self.request(urls[0])
+            self.assertIn(b"const MAX_FILE_RETRIES = 3;", html)
+            self.assertIn(b"const STALL_TIMEOUT_MS = 45000;", html)
+        with self.running_cli(extra_args=["--stall-timeout-sec", 7]) as (_, urls):
+            _, html = self.request(urls[0])
+            self.assertIn(b"const STALL_TIMEOUT_MS = 7000;", html)
 
     def test_private_cli_same_secret_link_on_all_listeners_and_routes(self):
         with self.running_cli(private=True, listeners=2) as (root, urls):

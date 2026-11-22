@@ -4,7 +4,6 @@ import contextlib
 import errno
 import hashlib
 import http.client
-import importlib
 import importlib.util
 import io
 import json
@@ -16,10 +15,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.parse import urlencode
 
-upload_server = importlib.import_module("upload_server")
-sys.modules["upload_server"] = upload_server
+# android_server does `import upload_server`, so the repository root must be
+# importable and the module registered under exactly that name.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import upload_server  # noqa: E402
+
 spec = importlib.util.spec_from_file_location(
     "android_server", Path(__file__).resolve().parents[1]
     / "android/app/src/main/python/android_server.py"
@@ -132,7 +135,7 @@ class AndroidServerTest(unittest.TestCase):
         self.port = android_server.start(self.storage, self.token, 0)
         status, html = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"fetch('api/preflight'", html)
+        self.assertIn(b"fetchJson('api/preflight'", html)
         rel = "normal/inner/data.bin"
         payload = bytes(range(256)) * 17
         status, body = self.preflight([{"path": rel, "size": len(payload)}])
@@ -152,6 +155,26 @@ class AndroidServerTest(unittest.TestCase):
         status, _ = self.upload(rel, b"replacement", "overwrite")
         self.assertEqual(status, 200)
         self.assertEqual(target.read_bytes(), b"replacement")
+
+    def test_status_route_needs_the_private_prefix_and_reports_stored_files(self):
+        query = urlencode({"upload_id": "android-upload", "path": "state/s.bin"})
+        status, _ = self.request("GET", f"/api/status?{query}")
+        self.assertEqual(status, 404)
+        status, _ = self.request("GET", f"/wrong{self.token}/api/status?{query}")
+        self.assertEqual(status, 404)
+        status, body = self.request("GET", f"/{self.token}/api/status?{query}")
+        self.assertEqual(status, 200, body)
+        self.assertFalse(json.loads(body)["done"])
+        payload = bytes(range(256)) * 9
+        status, _ = self.upload("state/s.bin", payload)
+        self.assertEqual(status, 200)
+        # Without the prefix the answer stays hidden even for a stored file.
+        status, _ = self.request("GET", f"/api/status?{query}")
+        self.assertEqual(status, 404)
+        reply = json.loads(self.request("GET", f"/{self.token}/api/status?{query}")[1])
+        self.assertTrue(reply["done"])
+        self.assertEqual(reply["bytes"], len(payload))
+        self.assertEqual(reply["sha256"], hashlib.sha256(payload).hexdigest())
 
     def test_switching_normal_and_private_modes_changes_accepted_routes(self):
         private_token = self.token
@@ -206,8 +229,8 @@ class AndroidServerTest(unittest.TestCase):
         self.assertFalse(self.storage.tickets)
         status, html = self.request("GET", f"/{self.token}/")
         self.assertEqual(status, 200)
-        self.assertIn(b"fetch('api/preflight'", html)
-        self.assertIn(b"`api/upload?", html)
+        self.assertIn(b"fetchJson('api/preflight'", html)
+        self.assertIn(b"`api/${route}?", html)
         self.assertNotIn(b"fetch('/api", html)
 
     def test_nested_stream_exact_sha_preflight_skip_and_overwrite(self):
@@ -318,18 +341,49 @@ class AndroidServerTest(unittest.TestCase):
         self.assertEqual(json.loads(body)["total_files"], 0)
         self.assertEqual((self.root / "keep.bin").read_bytes(), b"after restart")
 
+    def _hold_all_connections(self, holders):
+        limit = android_server.MAX_CONNECTIONS
+        for _ in range(limit):
+            holders.append(socket.create_connection(("127.0.0.1", self.port), timeout=2))
+        deadline = time.monotonic() + 3
+        while len(android_server._server._clients) < limit and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(android_server._server._clients), limit)
+
     def test_idle_unauthenticated_connections_cannot_create_unbounded_threads(self):
         holders = []
         try:
-            for _ in range(8):
-                holders.append(socket.create_connection(("127.0.0.1", self.port), timeout=2))
-            deadline = time.monotonic() + 2
-            while len(android_server._server._clients) < 8 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertEqual(len(android_server._server._clients), 8)
-            with socket.create_connection(("127.0.0.1", self.port), timeout=2) as ninth:
-                self.assertEqual(ninth.recv(1), b"")
-            self.assertEqual(len(android_server._server._clients), 8)
+            self._hold_all_connections(holders)
+            with socket.create_connection(("127.0.0.1", self.port), timeout=2) as extra:
+                self.assertEqual(extra.recv(1), b"")
+            self.assertEqual(len(android_server._server._clients), android_server.MAX_CONNECTIONS)
+        finally:
+            for holder in holders:
+                holder.close()
+
+    def test_refused_connections_are_logged_once_per_interval(self):
+        sink = RecordingLog()
+        self.port = android_server.start(self.storage, self.token, 0, sink)
+        holders = []
+        try:
+            self._hold_all_connections(holders)
+            for _ in range(4):
+                with socket.create_connection(("127.0.0.1", self.port), timeout=2) as extra:
+                    self.assertEqual(extra.recv(1), b"")
+            lines = [m for m in sink.messages if m.startswith("Connection refused:")]
+            self.assertEqual(
+                lines,
+                [f"Connection refused: ip=127.0.0.1 reason=all "
+                 f"{android_server.MAX_CONNECTIONS} connections in use"],
+            )
+            # Negative control: without the interval every refusal is logged,
+            # so the single line above really comes from the rate limit.
+            with mock.patch.object(android_server, "_REFUSAL_LOG_INTERVAL_SEC", 0):
+                for _ in range(2):
+                    with socket.create_connection(("127.0.0.1", self.port), timeout=2) as extra:
+                        self.assertEqual(extra.recv(1), b"")
+            lines = [m for m in sink.messages if m.startswith("Connection refused:")]
+            self.assertEqual(len(lines), 3)
         finally:
             for holder in holders:
                 holder.close()
@@ -410,11 +464,14 @@ class AndroidServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         status, _ = self.request("GET", f"/{self.token}/unknown?privateQuery=privatePayload")
         self.assertEqual(status, 404)
-        self.assertEqual(sum(" method=" in message for message in sink.messages), 6)
+        # Only requests that no handler describes itself are logged per request.
+        self.assertEqual(sum(" method=" in message for message in sink.messages), 1)
         joined = "\n".join(sink.messages)
-        for expected in ("method=GET route=page", "route=other", "START ", "DONE ",
+        for expected in ("Page opened:", "method=GET route=other status=404", "START ", "DONE ",
                          "Upload rejected:", "status=409", "Upload error:", "Preflight error:"):
             self.assertIn(expected, joined)
+        for gone in ("Client request:", "Upload started:"):
+            self.assertNotIn(gone, joined)
         for secret in (self.token, "privatePayload", "privateQuery", "content://", "https://", "private/document"):
             self.assertNotIn(secret, joined)
 
