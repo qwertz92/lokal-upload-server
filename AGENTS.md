@@ -4,7 +4,7 @@ This repository contains a dependency-free desktop Python upload server and an
 Android app which embeds that same server. Keep documentation and code comments
 in English. The existing MIT license remains authoritative.
 
-- Main server: `2025_12_python_upload_webserver.py`; older variants are retained.
+- Main server: `upload_server.py`; older variants are kept in `legacy/` and not maintained.
 - Android: `android/`; its build generates `upload_server.py` from the main script.
   Never maintain a second copy of the browser UI or HTTP implementation.
 - Run `python -m unittest discover -s tests` after server changes.

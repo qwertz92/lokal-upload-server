@@ -64,7 +64,7 @@ android {
 
 // Copy only into build output: the desktop server remains the single source of truth.
 def bundleUploadServer = tasks.register('bundleUploadServer', Copy) {
-    from('../../2025_12_python_upload_webserver.py')
+    from('../../upload_server.py')
     into(layout.buildDirectory.dir('generated/python'))
     rename { 'upload_server.py' }
 }

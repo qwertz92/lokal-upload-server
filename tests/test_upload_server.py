@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 # The module name starts with a digit, so it cannot be imported with `import`.
-server = importlib.import_module("2025_12_python_upload_webserver")
+server = importlib.import_module("upload_server")
 
 
 class QuietUploadServer(server.SimpleUploadServer):

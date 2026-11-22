@@ -15,7 +15,7 @@ import time
 import unittest
 from urllib.parse import urlencode, urlparse
 
-SCRIPT = Path(__file__).resolve().parents[1] / "2025_12_python_upload_webserver.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "upload_server.py"
 
 
 class DesktopPrivacyTest(unittest.TestCase):

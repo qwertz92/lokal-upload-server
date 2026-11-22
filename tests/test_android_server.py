@@ -18,7 +18,7 @@ import time
 import unittest
 from urllib.parse import urlencode
 
-upload_server = importlib.import_module("2025_12_python_upload_webserver")
+upload_server = importlib.import_module("upload_server")
 sys.modules["upload_server"] = upload_server
 spec = importlib.util.spec_from_file_location(
     "android_server", Path(__file__).resolve().parents[1]

@@ -51,7 +51,7 @@ build tools or account.
 - Check your interpreter before relying on it:
 
 ```bash
-python 2025_12_python_upload_webserver.py --selftest
+python upload_server.py --selftest
 ```
 
   This starts the server on a temporary port, fetches the page once, and exits.
@@ -121,19 +121,19 @@ Verification coverage and device limits: [docs/STATUS.md](docs/STATUS.md).
 ## Start (Windows)
 
 ```powershell
-python .\2025_12_python_upload_webserver.py
+python .\upload_server.py
 ```
 
 ## Start (Linux)
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py
+python3 ./upload_server.py
 ```
 
 If your default Python is 3.9+:
 
 ```bash
-python ./2025_12_python_upload_webserver.py
+python ./upload_server.py
 ```
 
 ## CLI Options
@@ -151,41 +151,41 @@ python ./2025_12_python_upload_webserver.py
 Examples:
 
 ```powershell
-python .\2025_12_python_upload_webserver.py --host 192.168.1.50 --port 9000 --per-client-limit 2
+python .\upload_server.py --host 192.168.1.50 --port 9000 --per-client-limit 2
 ```
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --host 192.168.1.50 --port 9000 --per-client-limit 2
+python3 ./upload_server.py --host 192.168.1.50 --port 9000 --per-client-limit 2
 ```
 
 Multiple interfaces with one port:
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1 --host 192.168.1.50 --port 8040
+python3 ./upload_server.py --host 127.0.0.1 --host 192.168.1.50 --port 8040
 ```
 
 Multiple independent sockets (host + port pairs):
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --listen 127.0.0.1:8040 --listen 192.168.1.50:9000
+python3 ./upload_server.py --listen 127.0.0.1:8040 --listen 192.168.1.50:9000
 ```
 
 Custom retry and timeout tuning:
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --retry-count 3 --retry-delay-ms 1200 --upload-timeout-sec 1800
+python3 ./upload_server.py --retry-count 3 --retry-delay-ms 1200 --upload-timeout-sec 1800
 ```
 
 Disable per-file timeout (large files on slow links):
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --upload-timeout-sec 0
+python3 ./upload_server.py --upload-timeout-sec 0
 ```
 
 Only localhost:
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --host 127.0.0.1
+python3 ./upload_server.py --host 127.0.0.1
 ```
 
 ## Access
@@ -197,7 +197,7 @@ The default desktop launch keeps these simple IP/port addresses. To explicitly
 enable Privacy mode:
 
 ```bash
-python3 ./2025_12_python_upload_webserver.py --private
+python3 ./upload_server.py --private
 ```
 
 Use the complete secret link printed by the server. Restarting generates a new
@@ -267,7 +267,7 @@ link; previous links stop working. HTTP remains unencrypted in both modes.
 
 ## Configuration Defaults In Code
 
-- Runtime defaults are centralized at the top of `2025_12_python_upload_webserver.py`.
+- Runtime defaults are centralized at the top of `upload_server.py`.
 - You can change defaults there if you want project-wide behavior without passing CLI flags every time.
 - Recommended: prefer CLI options for temporary/per-run changes, and edit code defaults only for permanent defaults.
 
@@ -310,7 +310,7 @@ request-body rules (`Content-Length`, chunked encoding), and temp-file cleanup.
 
 ## Repository Layout
 
-- `2025_12_python_upload_webserver.py`: current main server
+- `upload_server.py`: current main server
 - `tests/`: unit tests for the main server and the easy server
 - `uploads/`: upload destination folder
-- `python_bootstrap_server.py`, `python_latest_easy_server.py`: older variants
+- `legacy/python_bootstrap_server.py`, `legacy/python_latest_easy_server.py`: older variants, not maintained
